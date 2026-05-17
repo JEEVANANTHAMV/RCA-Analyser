@@ -1,0 +1,198 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-display: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-signal-ok: var(--signal-ok);
+  --color-signal-warn: var(--signal-warn);
+  --color-signal-crit: var(--signal-crit);
+  --color-grid-line: var(--grid-line);
+}
+
+/* Industrial control room — dark, dense, HMI-inspired */
+:root {
+  --radius: 0.375rem;
+  --background: oklch(0.16 0.018 255);
+  --foreground: oklch(0.94 0.01 100);
+
+  --card: oklch(0.19 0.02 255);
+  --card-foreground: oklch(0.94 0.01 100);
+  --popover: oklch(0.2 0.022 255);
+  --popover-foreground: oklch(0.94 0.01 100);
+
+  --primary: oklch(0.78 0.17 70);     /* amber/orange — primary action */
+  --primary-foreground: oklch(0.16 0.02 255);
+
+  --secondary: oklch(0.24 0.025 255);
+  --secondary-foreground: oklch(0.94 0.01 100);
+
+  --muted: oklch(0.22 0.022 255);
+  --muted-foreground: oklch(0.65 0.018 250);
+
+  --accent: oklch(0.7 0.16 200);      /* cyan */
+  --accent-foreground: oklch(0.14 0.02 255);
+
+  --destructive: oklch(0.62 0.22 25);
+  --destructive-foreground: oklch(0.98 0 0);
+
+  --border: oklch(0.28 0.022 255);
+  --input: oklch(0.24 0.022 255);
+  --ring: oklch(0.78 0.17 70);
+
+  --chart-1: oklch(0.78 0.17 70);
+  --chart-2: oklch(0.7 0.16 200);
+  --chart-3: oklch(0.72 0.18 145);
+  --chart-4: oklch(0.65 0.2 30);
+  --chart-5: oklch(0.7 0.18 320);
+
+  --signal-ok: oklch(0.74 0.17 145);
+  --signal-warn: oklch(0.82 0.17 85);
+  --signal-crit: oklch(0.65 0.24 25);
+  --grid-line: oklch(0.28 0.02 255 / 0.6);
+
+  --sidebar: oklch(0.18 0.02 255);
+  --sidebar-foreground: oklch(0.9 0.01 100);
+  --sidebar-primary: oklch(0.78 0.17 70);
+  --sidebar-primary-foreground: oklch(0.16 0.02 255);
+  --sidebar-accent: oklch(0.24 0.022 255);
+  --sidebar-accent-foreground: oklch(0.94 0.01 100);
+  --sidebar-border: oklch(0.26 0.022 255);
+  --sidebar-ring: oklch(0.78 0.17 70);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html, body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+  body {
+    background-image:
+      linear-gradient(var(--color-grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--color-grid-line) 1px, transparent 1px);
+    background-size: 48px 48px;
+    background-position: -1px -1px;
+  }
+  code, pre, .mono { font-family: var(--font-mono); }
+  h1, h2, h3, .display { font-family: var(--font-display); letter-spacing: -0.01em; }
+}
+
+@layer utilities {
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes messageSlide {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 5px rgba(251, 191, 36, 0.2); }
+    50% { box-shadow: 0 0 20px rgba(251, 191, 36, 0.4); }
+  }
+  @keyframes typewriter {
+    from { width: 0; }
+    to { width: 100%; }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  .animate-fadeIn {
+    animation: fadeIn 0.4s ease-out;
+  }
+  .animate-slideIn {
+    animation: slideIn 0.3s ease-out;
+  }
+  .animate-messageSlide {
+    animation: messageSlide 0.35s ease-out;
+  }
+  .animate-glowPulse {
+    animation: glowPulse 2s ease-in-out infinite;
+  }
+  .animate-shimmer {
+    background: linear-gradient(90deg, transparent 0%, rgba(251,191,36,0.08) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 2s infinite;
+  }
+  .animate-typewriter {
+    overflow: hidden;
+    white-space: nowrap;
+    animation: typewriter 2s steps(40, end);
+  }
+}
+
+@layer components {
+  .panel {
+    background-color: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+  }
+  .panel-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--color-border);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    color: var(--color-muted-foreground);
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    box-shadow: 0 0 8px currentColor;
+  }
+}
