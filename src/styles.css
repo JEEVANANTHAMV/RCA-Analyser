@@ -1,5 +1,4 @@
-@import "tailwindcss" source(none);
-@source "../src";
+@import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
@@ -65,7 +64,7 @@
   --popover: oklch(0.2 0.022 255);
   --popover-foreground: oklch(0.94 0.01 100);
 
-  --primary: oklch(0.78 0.17 70);     /* amber/orange — primary action */
+  --primary: oklch(0.78 0.17 70); /* amber/orange — primary action */
   --primary-foreground: oklch(0.16 0.02 255);
 
   --secondary: oklch(0.24 0.025 255);
@@ -74,7 +73,7 @@
   --muted: oklch(0.22 0.022 255);
   --muted-foreground: oklch(0.65 0.018 250);
 
-  --accent: oklch(0.7 0.16 200);      /* cyan */
+  --accent: oklch(0.7 0.16 200); /* cyan */
   --accent-foreground: oklch(0.14 0.02 255);
 
   --destructive: oklch(0.62 0.22 25);
@@ -109,10 +108,42 @@
   * {
     border-color: var(--color-border);
   }
-  html, body {
+  html,
+  body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
+  }
+  
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  textarea,
+  select {
+    background-color: oklch(0.12 0.01 255) !important; /* clean inset dark bg */
+    border: 1px solid oklch(0.38 0.015 255) !important; /* crisp, visible border */
+    color: var(--color-foreground) !important;
+    border-radius: var(--radius-md) !important;
+    transition: all 0.15s ease-in-out !important;
+  }
+
+  input[type="text"]:focus,
+  input[type="email"]:focus,
+  input[type="password"]:focus,
+  textarea:focus,
+  select:focus {
+    background-color: oklch(0.14 0.01 255) !important;
+    border-color: var(--color-primary) !important;
+    box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.25) !important;
+    outline: none !important;
+  }
+
+  input[type="text"]::placeholder,
+  input[type="email"]::placeholder,
+  input[type="password"]::placeholder,
+  textarea::placeholder {
+    color: oklch(0.58 0.015 250) !important;
+    opacity: 0.95 !important;
   }
   body {
     background-image:
@@ -121,34 +152,75 @@
     background-size: 48px 48px;
     background-position: -1px -1px;
   }
-  code, pre, .mono { font-family: var(--font-mono); }
-  h1, h2, h3, .display { font-family: var(--font-display); letter-spacing: -0.01em; }
+  code,
+  pre,
+  .mono {
+    font-family: var(--font-mono);
+  }
+  h1,
+  h2,
+  h3,
+  .display {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
 }
 
 @layer utilities {
   @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   @keyframes slideIn {
-    from { opacity: 0; transform: translateX(-12px); }
-    to { opacity: 1; transform: translateX(0); }
+    from {
+      opacity: 0;
+      transform: translateX(-12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
   }
   @keyframes messageSlide {
-    from { opacity: 0; transform: translateY(16px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   @keyframes glowPulse {
-    0%, 100% { box-shadow: 0 0 5px rgba(251, 191, 36, 0.2); }
-    50% { box-shadow: 0 0 20px rgba(251, 191, 36, 0.4); }
+    0%,
+    100% {
+      box-shadow: 0 0 5px rgba(251, 191, 36, 0.2);
+    }
+    50% {
+      box-shadow: 0 0 20px rgba(251, 191, 36, 0.4);
+    }
   }
   @keyframes typewriter {
-    from { width: 0; }
-    to { width: 100%; }
+    from {
+      width: 0;
+    }
+    to {
+      width: 100%;
+    }
   }
   @keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
   }
 
   .animate-fadeIn {
@@ -164,7 +236,12 @@
     animation: glowPulse 2s ease-in-out infinite;
   }
   .animate-shimmer {
-    background: linear-gradient(90deg, transparent 0%, rgba(251,191,36,0.08) 50%, transparent 100%);
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(251, 191, 36, 0.08) 50%,
+      transparent 100%
+    );
     background-size: 200% 100%;
     animation: shimmer 2s infinite;
   }
@@ -182,7 +259,9 @@
     border-radius: var(--radius-lg);
   }
   .panel-header {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--color-border);
     font-family: var(--font-mono);
@@ -192,7 +271,9 @@
     color: var(--color-muted-foreground);
   }
   .status-dot {
-    width: 8px; height: 8px; border-radius: 50%;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
     box-shadow: 0 0 8px currentColor;
   }
 }

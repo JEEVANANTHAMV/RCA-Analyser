@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { signinFn, signupFn, signoutFn } from "@/lib/auth.functions";
+import { signinFn, signupFn, signoutFn, signupWithInviteFn } from "@/lib/auth.functions";
 
 export interface AuthUser {
   id: string;
@@ -31,6 +31,12 @@ interface AuthContextType {
   loading: boolean;
   login: (email: string, password: string) => Promise<{ error?: string }>;
   signup: (email: string, password: string, fullName: string) => Promise<{ error?: string }>;
+  signupWithInvite: (
+    code: string,
+    email: string,
+    password: string,
+    fullName: string,
+  ) => Promise<{ error?: string }>;
   logout: () => Promise<void>;
 }
 
@@ -40,6 +46,7 @@ const AuthContext = createContext<AuthContextType>({
   loading: true,
   login: async () => ({}),
   signup: async () => ({}),
+  signupWithInvite: async () => ({}),
   logout: async () => {},
 });
 
@@ -64,8 +71,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setCookie("auth_token", result.token, 7);
       setUser(result.user);
       return {};
-    } catch (e: any) {
-      return { error: e.message || "Login failed" };
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      return { error: message || "Login failed" };
     }
   };
 
@@ -75,21 +83,51 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setCookie("auth_token", result.token, 7);
       setUser(result.user);
       return {};
-    } catch (e: any) {
-      return { error: e.message || "Signup failed" };
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      return { error: message || "Signup failed" };
+    }
+  };
+
+  const doSignupWithInvite = async (
+    code: string,
+    email: string,
+    password: string,
+    fullName: string,
+  ) => {
+    try {
+      const result = await signupWithInviteFn({ data: { code, email, password, fullName } });
+      setCookie("auth_token", result.token, 7);
+      setUser(result.user);
+      return {};
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      return { error: message || "Signup failed" };
     }
   };
 
   const doLogout = async () => {
     try {
       await signoutFn();
-    } catch {}
+    } catch {
+      // ignore
+    }
     removeCookie("auth_token");
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, isAdmin: user?.role === "admin", loading, login: doLogin, signup: doSignup, logout: doLogout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAdmin: user?.role === "admin",
+        loading,
+        login: doLogin,
+        signup: doSignup,
+        signupWithInvite: doSignupWithInvite,
+        logout: doLogout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

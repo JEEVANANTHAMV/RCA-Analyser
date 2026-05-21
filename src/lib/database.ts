@@ -5,9 +5,9 @@ import bcryptPkg from "bcryptjs";
 const { hashSync: bcryptHashSync } = bcryptPkg;
 
 function genUuid(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c: string) => {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c: string) => {
     const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x4).toString(16);
+    return (c === "x" ? r : (r & 0x3) | 0x4).toString(16);
   });
 }
 
@@ -111,13 +111,34 @@ function initializeTables() {
     BEGIN
       UPDATE conversations SET updated_at = datetime('now') WHERE id = NEW.id;
     END;
+
+    CREATE TABLE IF NOT EXISTS invites (
+      code TEXT PRIMARY KEY,
+      email TEXT,
+      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      used_by TEXT,
+      foreign key (created_by) references users(id) ON DELETE CASCADE,
+      foreign key (used_by) references users(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_invites_code ON invites(code);
   `);
 
   const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
   if (userCount.count === 0) {
     const adminHash = bcryptHashSync("admin123", 10);
-    db.prepare("INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')")
-      .run(generateId(), "admin@rca.local", adminHash, "Admin User");
+    db.prepare(
+      "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
+    ).run(generateId(), "admin@rca.local", adminHash, "Admin User");
+
+    const supportHash = bcryptHashSync("Psgcas@12", 10);
+    db.prepare(
+      "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
+    ).run(generateId(), "support@innosynth.org", supportHash, "Support Admin");
   }
 }
 

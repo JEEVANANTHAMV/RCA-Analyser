@@ -2,9 +2,21 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth-middleware";
 import { getDb } from "@/lib/database";
-import { getAllUsers, getAnalytics, getAllCases, changeUserRole, deleteUser } from "@/lib/auth";
+import {
+  getAllUsers,
+  getAnalytics,
+  getAllCases,
+  changeUserRole,
+  deleteUser,
+  adminCreateUser,
+  createInvite,
+  getInvites,
+  deleteInvite,
+  adminResetPassword,
+  AuthUser,
+} from "@/lib/auth";
 
-async function assertAdmin(user: any) {
+async function assertAdmin(user: AuthUser | null | undefined) {
   if (user?.role !== "admin") throw new Error("Forbidden — admin only");
 }
 
@@ -74,5 +86,77 @@ export const adminDeleteUser = createServerFn({ method: "POST" })
     await assertAdmin(user);
     if (data.targetUserId === user.id) throw new Error("Cannot delete yourself");
     deleteUser(data.targetUserId);
+    return { ok: true };
+  });
+
+export const adminCreateOperator = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        email: z.string().email(),
+        password: z.string().min(8),
+        fullName: z.string().max(100),
+        role: z.enum(["admin", "user"]),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    const newOperator = await adminCreateUser(data.email, data.password, data.fullName, data.role);
+    return { ok: true, user: newOperator };
+  });
+
+export const adminGenerateInvite = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        email: z.string().email().optional().nullable(),
+        role: z.enum(["admin", "user"]),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    const invite = createInvite(data.email || null, data.role, user.id);
+    return invite;
+  });
+
+export const adminListInvites = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async ({ context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    const invites = getInvites();
+    return { invites };
+  });
+
+export const adminDeleteInvite = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ code: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    deleteInvite(data.code);
+    return { ok: true };
+  });
+
+export const adminResetOperatorPassword = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        targetUserId: z.string(),
+        newPassword: z.string().min(8),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    await adminResetPassword(data.targetUserId, data.newPassword);
     return { ok: true };
   });

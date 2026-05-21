@@ -11,5 +11,9 @@ function Index() {
     if (loading) return;
     nav({ to: user ? "/dashboard" : "/login" });
   }, [user, loading, nav]);
-  return <div className="min-h-screen flex items-center justify-center text-muted-foreground mono text-sm">// routing…</div>;
+  return (
+    <div className="min-h-screen flex items-center justify-center text-muted-foreground mono text-sm">
+      // routing…
+    </div>
+  );
 }
