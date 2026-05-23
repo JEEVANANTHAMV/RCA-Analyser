@@ -374,6 +374,27 @@ function CasePage() {
     }
   });
 
+  const saveInteractiveStepMut = useMutation({
+    mutationFn: async (updatedPayload: any) => {
+      const msg = messages.filter((m: any) => m.role === "assistant").slice(-1)[0];
+      if (!msg) throw new Error("No agent message found to update");
+      return updateAssistantMessageFn({
+        data: {
+          conversationId: convId!,
+          messageId: msg.id,
+          content: JSON.stringify(updatedPayload, null, 2),
+        }
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["msgs", convId] });
+      setIsDirty(false);
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to auto-save status");
+    }
+  });
+
   const ensure = useServerFn(ensureConversation);
   const convQ = useQuery({
     queryKey: ["conv", caseId, currentAgent?.key],
@@ -2451,6 +2472,9 @@ function CasePage() {
                                     setFishboneStep({ ...fishboneStep!, data: next });
                                     setIsDirty(true);
                                   }}
+                                  onBlur={() => {
+                                    saveInteractiveStepMut.mutate(currentStepData);
+                                  }}
                                   className="flex-1 bg-transparent border border-border/30 rounded-lg p-3 text-sm font-semibold text-foreground focus:border-primary focus:ring-1 focus:ring-primary/20 focus:outline-none transition-all"
                                   placeholder="Cause description..."
                                 />
@@ -2464,12 +2488,13 @@ function CasePage() {
                                       const next = { ...currentStepData, refinedCauses: updated };
                                       setFishboneStep({ ...fishboneStep!, data: next });
                                       setIsDirty(true);
+                                      saveInteractiveStepMut.mutate(next);
                                       toast.success(`Cause ${e.target.value}`);
                                     }}
                                     className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${
                                       rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
                                       rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                      "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                                      "bg-amber-500/20 text-amber-400 border-amber-500/20"
                                     }`}
                                   >
                                     <option value="pending">⏳ Pending</option>
@@ -2507,6 +2532,7 @@ function CasePage() {
                                     const next = { ...currentStepData, refinedCauses: updated };
                                     setFishboneStep({ ...fishboneStep!, data: next });
                                     setIsDirty(true);
+                                    saveInteractiveStepMut.mutate(next);
                                     toast.success("Cause confirmed ✓");
                                   }}
                                   className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
@@ -2528,6 +2554,7 @@ function CasePage() {
                                     const next = { ...currentStepData, refinedCauses: updated };
                                     setFishboneStep({ ...fishboneStep!, data: next });
                                     setIsDirty(true);
+                                    saveInteractiveStepMut.mutate(next);
                                     toast.info("Cause refuted");
                                   }}
                                   className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
@@ -2547,6 +2574,7 @@ function CasePage() {
                                     const next = { ...currentStepData, refinedCauses: updated };
                                     setFishboneStep({ ...fishboneStep!, data: next });
                                     setIsDirty(true);
+                                    saveInteractiveStepMut.mutate(next);
                                     toast.info("Cause removed");
                                   }}
                                   className="text-sm px-4 py-2 rounded-lg bg-muted/80 text-muted-foreground border border-border hover:bg-secondary transition-all font-mono"
@@ -2565,6 +2593,7 @@ function CasePage() {
                               const next = { ...currentStepData, refinedCauses: updated };
                               setFishboneStep({ ...fishboneStep!, data: next });
                               setIsDirty(true);
+                              saveInteractiveStepMut.mutate(next);
                             }}
                             className="w-full text-sm text-primary/80 hover:text-primary py-4 font-mono flex items-center justify-center gap-2 transition-all border-2 border-dashed border-border/40 rounded-xl hover:border-primary/30"
                           >
