@@ -824,19 +824,25 @@ function CasePage() {
           }
         }
       } else if (currentAgent?.key === "fault_tree") {
-        if (parsedData.tree) {
-          setFaultTree(parsedData.tree);
+        let treeData = parsedData;
+        if (parsedData.faultTreeAnalysis?.tree) {
+          treeData = { ...parsedData.faultTreeAnalysis, tree: parsedData.faultTreeAnalysis.tree };
+        } else if (parsedData.faultTreeAnalysis?.topEvent || parsedData.faultTreeAnalysis?.branches) {
+          treeData = parsedData.faultTreeAnalysis;
+        }
+        if (treeData.tree) {
+          setFaultTree(treeData.tree);
         } else {
           const tree = {
             id: "top-event",
-            label: parsedData.topEvent || "Incident Failure Event",
+            label: treeData.topEvent || "Incident Failure Event",
             type: "gate",
-            gateType: parsedData.gateType || "OR",
-            probability: parsedData.topProbability || 1.0,
+            gateType: treeData.gateType || "OR",
+            probability: treeData.topProbability || 1.0,
             children: [],
           };
-          if (Array.isArray(parsedData.branches)) {
-            tree.children = parsedData.branches.map((b: any, bi: number) => ({
+          if (Array.isArray(treeData.branches)) {
+            tree.children = treeData.branches.map((b: any, bi: number) => ({
               id: `branch-${bi}`,
               label: b.label || b.description || "Sub-failure",
               type: "gate",
@@ -854,27 +860,107 @@ function CasePage() {
           }
           setFaultTree(tree);
         }
-      } else if (currentAgent?.key === "timeline" && parsedData.timeline && Array.isArray(parsedData.timeline.phases)) {
-        setTimelineEvents(parsedData.timeline.phases);
-      } else if (currentAgent?.key === "equipment" && parsedData.reliabilityMetrics) {
-        if (parsedData.reliabilityMetrics.rpnScores) {
-          setEquipmentRPN(parsedData.reliabilityMetrics.rpnScores);
+       } else if (currentAgent?.key === "timeline") {
+        let timelineData = parsedData;
+        let phases = [];
+
+        if (parsedData.timeline?.phases && Array.isArray(parsedData.timeline.phases)) {
+          phases = parsedData.timeline.phases;
+        } else if (parsedData.timelineAnalysis?.timeline?.phases) {
+          timelineData = { timeline: parsedData.timelineAnalysis.timeline };
+          phases = parsedData.timelineAnalysis.timeline.phases;
+        } else if (parsedData.timelineAnalysis?.phases) {
+          timelineData = { timeline: { phases: parsedData.timelineAnalysis.phases } };
+          phases = parsedData.timelineAnalysis.phases;
+        } else if (parsedData.timelineAndEventCorrelation) {
+          // Actual AI format: {"timelineAndEventCorrelation": {"phases": [...]}}
+          const tec = parsedData.timelineAndEventCorrelation;
+          if (tec.phases && Array.isArray(tec.phases)) {
+            phases = tec.phases;
+          } else if (tec.timeline?.phases && Array.isArray(tec.timeline.phases)) {
+            phases = tec.timeline.phases;
+          } else {
+            // Try to extract phases from any nested structure
+            for (const key of Object.keys(tec)) {
+              if (Array.isArray(tec[key]) && tec[key].length > 0 && tec[key][0]?.phase) {
+                phases = tec[key];
+                break;
+              }
+            }
+          }
+          if (phases.length > 0) {
+            timelineData = { timeline: { phases } };
+          }
         }
-      } else if (currentAgent?.key === "report") {
-        if (parsedData.rootCause) {
-          setEditRootCauseText(parsedData.rootCause);
+
+        if (phases.length > 0) {
+          setTimelineEvents(phases);
+        } else if (timelineData.timeline && Array.isArray(timelineData.timeline.phases)) {
+          setTimelineEvents(timelineData.timeline.phases);
         }
-        if (Array.isArray(parsedData.correctiveActionsList)) {
-          setCapaActions(parsedData.correctiveActionsList);
+       } else if (currentAgent?.key === "pareto") {
+        let paretoData = parsedData;
+        if (parsedData.paretoAnalysis?.byFailureMode) {
+          // Standard format
+        } else if (parsedData.paretoAnalysisResult?.paretoAnalysis) {
+          paretoData = { ...parsedData, paretoAnalysis: parsedData.paretoAnalysisResult.paretoAnalysis };
+        } else if (parsedData.paretoAndTrendAnalysis) {
+          // Actual AI response format: {"paretoAndTrendAnalysis": {"paretoAnalysis": {"byFailureType": {"categories": [...]}}}}
+          const pta = parsedData.paretoAndTrendAnalysis;
+          let byFailureMode = [];
+          if (pta.paretoAnalysis?.byFailureType?.categories && Array.isArray(pta.paretoAnalysis.byFailureType.categories)) {
+            byFailureMode = pta.paretoAnalysis.byFailureType.categories.map((c: any) => ({
+              mode: c.name || c.label || c.category || c.mode || "Unknown",
+              frequency: c.frequency || c.count || c.value || 0,
+            }));
+          } else if (pta.paretoAnalysis?.byFailureMode && Array.isArray(pta.paretoAnalysis.byFailureMode)) {
+            byFailureMode = pta.paretoAnalysis.byFailureMode;
+          }
+          if (byFailureMode.length > 0) {
+            paretoData = { ...parsedData, paretoAnalysis: { byFailureMode } };
+          }
+        }
+      } else if (currentAgent?.key === "equipment") {
+        let equipData = parsedData;
+        if (parsedData.equipmentAnalysis?.reliabilityMetrics) {
+          equipData = { reliabilityMetrics: parsedData.equipmentAnalysis.reliabilityMetrics };
+        } else if (parsedData.equipmentAnalysis?.rpnScores) {
+          equipData = { reliabilityMetrics: { rpnScores: parsedData.equipmentAnalysis.rpnScores } };
+        }
+        if (equipData.reliabilityMetrics?.rpnScores) {
+          setEquipmentRPN(equipData.reliabilityMetrics.rpnScores);
+        }
+       } else if (currentAgent?.key === "report") {
+        let reportData: any = parsedData;
+        if (parsedData.rootCause || parsedData.correctiveActionsList) {
+          // Standard format already
+        } else if (parsedData.reportAnalysis && (parsedData.reportAnalysis.rootCause || parsedData.reportAnalysis.correctiveActionsList)) {
+          reportData = parsedData.reportAnalysis;
+        } else if (parsedData.rcaReport) {
+          // Actual AI format: {"rcaReport": {"rootCause": ..., "correctiveActionsList": [...]}}
+          reportData = parsedData.rcaReport;
+          // Also handle nested CAPA key names the AI might use
+          if (reportData.capaPlan) {
+            reportData.correctiveActionsList = reportData.capaPlan.correctiveActions || reportData.capaPlan.actions || reportData.correctiveActionsList;
+            reportData.preventiveActions = reportData.capaPlan.preventiveActions || reportData.preventiveActions;
+          }
+        } else if (parsedData.reportAnalysis) {
+          reportData = parsedData.reportAnalysis;
+        }
+        if (reportData.rootCause) {
+          setEditRootCauseText(reportData.rootCause);
+        }
+        if (Array.isArray(reportData.correctiveActionsList)) {
+          setCapaActions(reportData.correctiveActionsList);
         } else {
           const combined: any[] = [];
-          if (Array.isArray(parsedData.correctiveActions)) {
-            parsedData.correctiveActions.forEach((a: string, i: number) => {
+          if (Array.isArray(reportData.correctiveActions)) {
+            reportData.correctiveActions.forEach((a: string, i: number) => {
               combined.push({ id: `ca-${i}`, desc: a, owner: "Operator", date: "2026-06-01", status: "Pending" });
             });
           }
-          if (Array.isArray(parsedData.preventiveActions)) {
-            parsedData.preventiveActions.forEach((a: string, i: number) => {
+          if (Array.isArray(reportData.preventiveActions)) {
+            reportData.preventiveActions.forEach((a: string, i: number) => {
               combined.push({ id: `pa-${i}`, desc: a, owner: "Plant Manager", date: "2026-06-15", status: "Pending" });
             });
           }
@@ -882,8 +968,8 @@ function CasePage() {
             setCapaActions(combined);
           }
         }
-        if (parsedData.checklist) {
-          setCapaChecklist(parsedData.checklist);
+        if (reportData.checklist) {
+          setCapaChecklist(reportData.checklist);
         }
       }
     }
@@ -1604,14 +1690,14 @@ function CasePage() {
                               </div>
                             )}
 
-                            {step.possibleCauses && step.possibleCauses.length > 0 && (
-                              <div className="flex justify-end pt-2">
-                                <Button
-                                  variant="default"
-                                  disabled={sendMut.isPending || step.isStreaming}
-                                  onClick={submitResponse}
-                                  className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
-                                >
+                             {step.possibleCauses && step.possibleCauses.length > 0 && (
+                               <div className="flex justify-end pt-2">
+                                 <Button
+                                   variant="default"
+                                   disabled={sendMut.isPending || step.isStreaming || (!selectedCauseId && !customCauseText.trim())}
+                                   onClick={submitResponse}
+                                   className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
+                                 >
                                   {sendMut.isPending ? (
                                     <>
                                       <Loader2 className="w-4 h-4 animate-spin" /> Submitting...
@@ -3113,9 +3199,24 @@ function CasePage() {
         );
       }
 
-      case "pareto": {
-        const pareto = parsedData.paretoAnalysis || {};
-        const byFailureMode = Array.isArray(pareto.byFailureMode) ? pareto.byFailureMode : [];
+       case "pareto": {
+        let pareto = {};
+        let byFailureMode = [];
+
+        // Normalize: try multiple possible AI response formats
+        if (parsedData.paretoAnalysis?.byFailureMode) {
+          pareto = parsedData.paretoAnalysis;
+          byFailureMode = parsedData.paretoAnalysis.byFailureMode;
+        } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureType?.categories) {
+          byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureType.categories.map((c: any) => ({
+            mode: c.name || c.label || c.category || c.mode || "Unknown",
+            frequency: c.frequency || c.count || c.value || 0,
+          }));
+        } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureMode) {
+          byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureMode;
+        }
+
+        pareto = { byFailureMode, ...pareto };
 
         const sortedModes = [...byFailureMode].sort((a, b) => b.frequency - a.frequency);
         
@@ -3331,9 +3432,25 @@ function CasePage() {
         );
       }
 
-      case "timeline": {
-        const timeline = parsedData.timeline || {};
-        const phases = Array.isArray(timeline.phases) ? timeline.phases : [];
+       case "timeline": {
+        let timeline: any = {};
+        let phases: any[] = [];
+
+        // Normalize: try multiple possible AI response formats
+        if (parsedData.timeline?.phases) {
+          timeline = parsedData.timeline;
+          phases = parsedData.timeline.phases;
+        } else if (parsedData.timelineAndEventCorrelation?.phases) {
+          phases = parsedData.timelineAndEventCorrelation.phases;
+          timeline = { phases };
+        } else if (parsedData.timelineAndEventCorrelation?.timeline?.phases) {
+          timeline = parsedData.timelineAndEventCorrelation.timeline;
+          phases = timeline.phases;
+        } else {
+          timeline = parsedData.timeline || {};
+        }
+
+        phases = Array.isArray(phases) ? phases : [];
 
         const addPhase = () => {
           setNewPhaseName("New Phase");
@@ -3781,14 +3898,22 @@ function CasePage() {
         );
       }
 
-      case "report": {
+       case "report": {
         const defaultActions = [
           { id: "capa-1", desc: "Check safety lock constraints and verify manual controls are overridden.", owner: "Jane Doe (Maint)", date: "2026-05-25", status: "In Progress" },
           { id: "capa-2", desc: "Establish periodic inspection intervals for sensor suites and safety valves.", owner: "John Smith (Ops)", date: "2026-06-01", status: "Pending" }
         ];
 
-        const initialActions = (parsedData.correctiveActionsList && parsedData.correctiveActionsList.length > 0)
-          ? parsedData.correctiveActionsList
+        // Normalize: handle both standard and rcaReport wrapper formats
+        let reportPayload: any = parsedData;
+        if (parsedData.rcaReport) {
+          reportPayload = { ...parsedData, ...parsedData.rcaReport };
+        } else if (parsedData.reportAnalysis) {
+          reportPayload = { ...parsedData, ...parsedData.reportAnalysis };
+        }
+
+        const initialActions = (reportPayload.correctiveActionsList && reportPayload.correctiveActionsList.length > 0)
+          ? reportPayload.correctiveActionsList
           : defaultActions;
 
         const updateCapa = (id: string, key: string, val: any) => {
@@ -3809,7 +3934,7 @@ function CasePage() {
 
         const saveReport = () => {
           const updatedPayload = {
-            ...parsedData,
+            ...reportPayload,
             problemStatement: editProblemStatement,
             rootCause: editRootCauseText,
             correctiveActionsList: capaActions,

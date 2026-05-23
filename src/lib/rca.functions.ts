@@ -363,10 +363,25 @@ export const createRcaCase = createServerFn({ method: "POST" })
       }
     }
 
-    const incidentDataObj = {
+    const incidentDataObj: Record<string, any> = {
       description: data.description || "",
       attachments: savedAttachments,
     };
+
+    // If pre-analyzed data was approved, merge it into incident_data
+    // so the RCA workspace can load all fields on first render
+    if (data.preAnalyzedData) {
+      incidentDataObj.problemStatement = data.preAnalyzedData.problemStatement || "";
+      incidentDataObj.effect = data.preAnalyzedData.effect || "";
+      incidentDataObj.gaps = data.preAnalyzedData.gaps || [];
+      incidentDataObj.followUps = data.preAnalyzedData.followUps || [];
+      incidentDataObj.locked = true;
+      incidentDataObj.equipmentName = data.preAnalyzedData.equipmentName || "";
+      incidentDataObj.location = data.preAnalyzedData.location || "";
+      incidentDataObj.operatingConditions = data.preAnalyzedData.operatingConditions || "";
+      incidentDataObj.timestamp = data.preAnalyzedData.timestamp || "";
+      incidentDataObj.witnessedSymptoms = data.preAnalyzedData.witnessedSymptoms || "";
+    }
 
     db.prepare(
       "INSERT INTO rca_cases (id, user_id, title, asset_id, incident_data) VALUES (?, ?, ?, ?, ?)",
