@@ -11,12 +11,26 @@ import { Plus, Trash2, FileText, CheckCircle2, Clock, Paperclip, X, Eye, Sparkle
 import { toast } from "sonner";
 
 function parsePartialJson(jsonStr: string): any {
-  try {
-    return JSON.parse(jsonStr);
-  } catch {}
-
   let cleaned = jsonStr.trim();
   if (!cleaned) return null;
+
+  // Remove leading ```json or ```
+  if (cleaned.startsWith("```")) {
+    const firstNewline = cleaned.indexOf("\n");
+    if (firstNewline !== -1) {
+      cleaned = cleaned.slice(firstNewline + 1).trim();
+    } else {
+      cleaned = cleaned.slice(3).trim();
+    }
+  }
+  // Remove trailing ```
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.slice(0, -3).trim();
+  }
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {}
 
   let openBraces = 0;
   let openBrackets = 0;
@@ -95,6 +109,11 @@ function DashboardPage() {
   const [editEffect, setEditEffect] = useState("");
   const [editGaps, setEditGaps] = useState("");
   const [editFollowUps, setEditFollowUps] = useState("");
+  const [editEquipmentName, setEditEquipmentName] = useState("");
+  const [editLocation, setEditLocation] = useState("");
+  const [editOperatingConditions, setEditOperatingConditions] = useState("");
+  const [editTimestamp, setEditTimestamp] = useState("");
+  const [editWitnessedSymptoms, setEditWitnessedSymptoms] = useState("");
   const [isApproved, setIsApproved] = useState(false);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -163,6 +182,15 @@ function DashboardPage() {
     mutationFn: async () => {
       setPreAnalyzeStreamText("");
       setIsApproved(false);
+      setEditProblemStatement("");
+      setEditEffect("");
+      setEditGaps("");
+      setEditFollowUps("");
+      setEditEquipmentName("");
+      setEditLocation("");
+      setEditOperatingConditions("");
+      setEditTimestamp("");
+      setEditWitnessedSymptoms("");
       const res = await preAnalyzeFn({ data: { title, assetId: assetId || null, description, attachments } });
       if (!(res instanceof Response)) {
         return res;
@@ -185,10 +213,26 @@ function DashboardPage() {
 
         const parsed = parsePartialJson(accumulated);
         if (parsed) {
-          if (parsed.problemStatement) setEditProblemStatement(parsed.problemStatement);
-          if (parsed.effect) setEditEffect(parsed.effect);
-          if (Array.isArray(parsed.gaps)) setEditGaps(parsed.gaps.join("\n"));
-          if (Array.isArray(parsed.followUps)) setEditFollowUps(parsed.followUps.join("\n"));
+          const problem = parsed.problemStatement || "";
+          const effect = parsed.effect || parsed.effectImpact || "";
+          const gaps = Array.isArray(parsed.gaps) ? parsed.gaps.join("\n") : "";
+          const followUps = Array.isArray(parsed.followUps) ? parsed.followUps.join("\n") : "";
+          const context = parsed.operationalContext || {};
+          const equip = parsed.equipmentName || context.equipmentName || "";
+          const loc = parsed.location || context.location || "";
+          const opCond = parsed.operatingConditions || context.operatingConditions || "";
+          const tstamp = parsed.timestamp || context.timestamp || "";
+          const symptoms = parsed.witnessedSymptoms || context.witnessedSymptoms || "";
+
+          if (problem) setEditProblemStatement(problem);
+          if (effect) setEditEffect(effect);
+          if (gaps) setEditGaps(gaps);
+          if (followUps) setEditFollowUps(followUps);
+          if (equip) setEditEquipmentName(equip);
+          if (loc) setEditLocation(loc);
+          if (opCond) setEditOperatingConditions(opCond);
+          if (tstamp) setEditTimestamp(tstamp);
+          if (symptoms) setEditWitnessedSymptoms(symptoms);
         }
       }
       return accumulated;
@@ -210,6 +254,11 @@ function DashboardPage() {
         effect: editEffect,
         gaps: editGaps.split("\n").map(l => l.trim()).filter(Boolean),
         followUps: editFollowUps.split("\n").map(l => l.trim()).filter(Boolean),
+        equipmentName: editEquipmentName || null,
+        location: editLocation || null,
+        operatingConditions: editOperatingConditions || null,
+        timestamp: editTimestamp || null,
+        witnessedSymptoms: editWitnessedSymptoms || null,
       } : null;
 
       return createFn({
@@ -235,6 +284,11 @@ function DashboardPage() {
       setEditEffect("");
       setEditGaps("");
       setEditFollowUps("");
+      setEditEquipmentName("");
+      setEditLocation("");
+      setEditOperatingConditions("");
+      setEditTimestamp("");
+      setEditWitnessedSymptoms("");
       setIsApproved(false);
       nav({ to: "/rca/$caseId", params: { caseId: result.case.id } });
     },
