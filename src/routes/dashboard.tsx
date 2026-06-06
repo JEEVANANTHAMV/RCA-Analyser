@@ -7,7 +7,7 @@ import { listMyCases, createRcaCase, deleteCase, preAnalyzeIncident } from "@/li
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash2, FileText, CheckCircle2, Clock, Paperclip, X, Eye, Sparkles } from "lucide-react";
+import { Plus, Trash2, FileText, CheckCircle2, Clock, Paperclip, X, Eye, Sparkles, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 function parsePartialJson(jsonStr: string): any {
@@ -408,7 +408,12 @@ function DashboardPage() {
                     <Sparkles className="w-4 h-4 text-primary animate-pulse" />
                     <span className="text-sm font-bold mono uppercase">// AI Incident Pre-Analysis Findings</span>
                   </div>
-                  {isApproved ? (
+                  {preAnalyzeMut.isPending ? (
+                    <span className="flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 bg-primary/10 text-primary rounded border border-primary/30 animate-pulse">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      STREAMING…
+                    </span>
+                  ) : isApproved ? (
                     <span className="text-[10px] font-mono px-2 py-0.5 bg-green-500/20 text-green-500 rounded border border-green-500/40">
                       APPROVED & READY
                     </span>
@@ -422,58 +427,92 @@ function DashboardPage() {
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground mono">// PROBLEM STATEMENT</label>
-                    <Textarea
-                      value={editProblemStatement}
-                      onChange={(e) => {
-                        setEditProblemStatement(e.target.value);
-                        setIsApproved(false);
-                      }}
-                      className="font-semibold text-sm bg-background/50 font-sans border-border/50 focus:border-primary/50"
-                      rows={3}
-                      placeholder="Enter problem statement..."
-                    />
+                    {preAnalyzeMut.isPending && !editProblemStatement ? (
+                      <div className="min-h-[72px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
+                        <div className="h-3 w-full rounded bg-muted/60 animate-pulse" />
+                        <div className="h-3 w-5/6 rounded bg-muted/60 animate-pulse" />
+                      </div>
+                    ) : (
+                      <Textarea
+                        value={editProblemStatement}
+                        onChange={(e) => {
+                          setEditProblemStatement(e.target.value);
+                          setIsApproved(false);
+                        }}
+                        className="font-semibold text-sm bg-background/50 font-sans border-border/50 focus:border-primary/50"
+                        rows={3}
+                        autoResize
+                        placeholder="Enter problem statement..."
+                      />
+                    )}
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground mono">// OPERATIONAL EFFECT / IMPACT</label>
-                    <Textarea
-                      value={editEffect}
-                      onChange={(e) => {
-                        setEditEffect(e.target.value);
-                        setIsApproved(false);
-                      }}
-                      className="font-semibold text-sm text-destructive bg-background/50 font-sans border-border/50 focus:border-primary/50"
-                      rows={3}
-                      placeholder="Enter operational impact..."
-                    />
+                    {preAnalyzeMut.isPending && !editEffect ? (
+                      <div className="min-h-[72px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
+                        <div className="h-3 w-full rounded bg-muted/60 animate-pulse" />
+                        <div className="h-3 w-4/5 rounded bg-muted/60 animate-pulse" />
+                      </div>
+                    ) : (
+                      <Textarea
+                        value={editEffect}
+                        onChange={(e) => {
+                          setEditEffect(e.target.value);
+                          setIsApproved(false);
+                        }}
+                        className="font-semibold text-sm text-destructive bg-background/50 font-sans border-border/50 focus:border-primary/50"
+                        rows={3}
+                        autoResize
+                        placeholder="Enter operational impact..."
+                      />
+                    )}
                   </div>
                 </div>
 
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <label className="text-xs text-primary mono">// GAPS & UNRESOLVED QUESTIONS (ONE PER LINE)</label>
-                    <Textarea
-                      value={editGaps}
-                      onChange={(e) => {
-                        setEditGaps(e.target.value);
-                        setIsApproved(false);
-                      }}
-                      className="text-xs text-muted-foreground bg-background/50 font-mono border-border/50 focus:border-primary/50"
-                      rows={4}
-                      placeholder="Enter gaps..."
-                    />
+                    {preAnalyzeMut.isPending && !editGaps ? (
+                      <div className="min-h-[96px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
+                        <div className="h-2.5 w-4/5 rounded bg-muted/60 animate-pulse" />
+                        <div className="h-2.5 w-3/5 rounded bg-muted/60 animate-pulse" />
+                        <div className="h-2.5 w-2/3 rounded bg-muted/60 animate-pulse" />
+                      </div>
+                    ) : (
+                      <Textarea
+                        value={editGaps}
+                        onChange={(e) => {
+                          setEditGaps(e.target.value);
+                          setIsApproved(false);
+                        }}
+                        className="text-xs text-muted-foreground bg-background/50 font-mono border-border/50 focus:border-primary/50"
+                        rows={4}
+                        autoResize
+                        placeholder="Enter gaps..."
+                      />
+                    )}
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs text-accent mono">// SUGGESTED FOLLOW-UPS (ONE PER LINE)</label>
-                    <Textarea
-                      value={editFollowUps}
-                      onChange={(e) => {
-                        setEditFollowUps(e.target.value);
-                        setIsApproved(false);
-                      }}
-                      className="text-xs text-muted-foreground bg-background/50 font-mono border-border/50 focus:border-primary/50"
-                      rows={4}
-                      placeholder="Enter follow-ups..."
-                    />
+                    {preAnalyzeMut.isPending && !editFollowUps ? (
+                      <div className="min-h-[96px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
+                        <div className="h-2.5 w-3/4 rounded bg-muted/60 animate-pulse" />
+                        <div className="h-2.5 w-4/5 rounded bg-muted/60 animate-pulse" />
+                        <div className="h-2.5 w-1/2 rounded bg-muted/60 animate-pulse" />
+                      </div>
+                    ) : (
+                      <Textarea
+                        value={editFollowUps}
+                        onChange={(e) => {
+                          setEditFollowUps(e.target.value);
+                          setIsApproved(false);
+                        }}
+                        className="text-xs text-muted-foreground bg-background/50 font-mono border-border/50 focus:border-primary/50"
+                        rows={4}
+                        autoResize
+                        placeholder="Enter follow-ups..."
+                      />
+                    )}
                   </div>
                 </div>
 
