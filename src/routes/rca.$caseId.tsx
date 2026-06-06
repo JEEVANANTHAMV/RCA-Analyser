@@ -14,6 +14,7 @@ import {
   updateCaseIncidentData,
   updateAssistantMessage,
   clearConversationMessages,
+  runFullAutomation,
 } from "@/lib/rca.functions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -44,6 +45,7 @@ import {
   TrendingUp,
   Clock,
   Zap,
+  Edit,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -242,6 +244,7 @@ function CasePage() {
   }>>([]);
   const [selectedFishboneAnswer, setSelectedFishboneAnswer] = useState("");
   const [drillingCategory, setDrillingCategory] = useState<string | null>(null);
+  const [showInteractiveGuideOverride, setShowInteractiveGuideOverride] = useState(false);
 
   // Fault Tree States
   const [faultTree, setFaultTree] = useState<any>(null);
@@ -277,6 +280,13 @@ function CasePage() {
   const [selectedCauseId, setSelectedCauseId] = useState<string>("");
   const [customCauseText, setCustomCauseText] = useState<string>("");
   const [isDirty, setIsDirty] = useState(false);
+
+  // Automation state
+  const [showAutoModal, setShowAutoModal] = useState(false);
+  const [autoProgress, setAutoProgress] = useState<Array<{
+    type: string; agent?: string; name?: string; step?: number; message?: string;
+  }>>([]);
+  const [autoRunning, setAutoRunning] = useState(false);
 
   const generateHypothesisFn = useServerFn(generateAgentHypothesis);
   const hypothesisMut = useMutation({
@@ -535,6 +545,46 @@ function CasePage() {
     onError: (err: any) => {
       toast.error(err.message || "Failed to clear chat history");
     }
+  });
+
+  const runAutoFn = useServerFn(runFullAutomation);
+  const autoMut = useMutation({
+    mutationFn: async () => {
+      setAutoProgress([]);
+      setAutoRunning(true);
+      const res = await runAutoFn({ data: { caseId } });
+      if (!(res instanceof Response)) return res;
+      if (!res.ok) throw new Error(await res.text() || "Automation failed");
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response body");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            setAutoProgress((prev) => [...prev, event]);
+          } catch {}
+        }
+      }
+    },
+    onSuccess: () => {
+      setAutoRunning(false);
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
+      qc.invalidateQueries({ queryKey: ["conv", caseId] });
+      qc.invalidateQueries({ queryKey: ["msgs"] });
+      toast.success("Full RCA automation complete!");
+    },
+    onError: (err: any) => {
+      setAutoRunning(false);
+      toast.error(err.message || "Automation failed");
+    },
   });
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1874,6 +1924,7 @@ function CasePage() {
         };
 
         const isComplete = fishboneStep && (fishboneStep.step === 10 || fishboneStep.type === "final");
+        const showFinalDiagram = isComplete && !showInteractiveGuideOverride;
 
         const submitFishboneResponse = (customText?: string) => {
           const text = customText || selectedFishboneAnswer;
@@ -1973,7 +2024,7 @@ function CasePage() {
           );
         }
 
-        if (!isComplete) {
+        if (!showFinalDiagram) {
           // fishboneStep may not be synced yet by useEffect (race condition).
           // Derive step data directly from messages as a reliable fallback.
           // Also check streaming text during active SSE to render live.
@@ -2010,9 +2061,21 @@ function CasePage() {
                   <Badge variant="outline" className="text-xs font-mono bg-primary/10 text-primary border-primary/20">
                     Step {currentStepNum} / 10
                   </Badge>
-                  <Button size="sm" variant="outline" className="text-[10px] h-6" onClick={finalizeFishboneNow} disabled={sendMut.isPending}>
-                    Finalize Now
-                  </Button>
+                  {isComplete && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setShowInteractiveGuideOverride(false)}
+                      className="text-[10px] h-6 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                    >
+                      View Final Diagram
+                    </Button>
+                  )}
+                  {!isComplete && (
+                    <Button size="sm" variant="outline" className="text-[10px] h-6" onClick={finalizeFishboneNow} disabled={sendMut.isPending}>
+                      Finalize Now
+                    </Button>
+                  )}
                 </div>
               </div>
 
@@ -2677,45 +2740,231 @@ function CasePage() {
                   </div>
                 )}
 
-                <div className="space-y-2 pt-2.5 border-t border-border/40">
-                  {(sendMut.isPending || streamingChatText !== null) ? (
-                    <div className="flex flex-col items-center justify-center p-6 bg-background/50 border border-dashed border-border rounded-lg space-y-3">
-                      <Loader2 className="w-6 h-6 animate-spin text-primary" />
-                      <p className="text-xs text-muted-foreground font-mono italic">
-                        Fishbone agent is analyzing evidence and drafting the next step...
-                      </p>
-                    </div>
-                  ) : (
-                    <>
-                      <p className="text-xs text-foreground font-bold leading-relaxed">{currentStepData.question || "Proposing next analysis step..."}</p>
-                      
-                      <div className="flex gap-2 items-end">
-                        <div className="flex-1">
-                          <Textarea
-                            value={selectedFishboneAnswer}
-                            onChange={(e) => setSelectedFishboneAnswer(e.target.value)}
-                            placeholder="Provide details, override proposal, or answer the question..."
-                            className="w-full text-xs font-mono p-3 min-h-[70px] bg-background border border-border rounded-lg"
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" && !e.shiftKey) {
-                                e.preventDefault();
-                                submitFishboneResponse();
-                              }
-                            }}
-                          />
+                {currentStepType === "final" && (() => {
+                  const [activeEditCat, setActiveEditCat] = useState("manpower");
+                  const causes = fishboneCategories[activeEditCat] || [];
+
+                  return (
+                    <div className="space-y-4">
+                      <div className="bg-secondary/30 border border-border/50 rounded-xl p-4">
+                        <div className="text-xs text-muted-foreground font-mono mb-2">// SELECT CATEGORY TO EDIT:</div>
+                        <div className="flex flex-wrap gap-2">
+                          {["manpower", "machine", "methods", "materials", "measurements", "environment"].map((cat) => {
+                            const isSelected = activeEditCat === cat;
+                            return (
+                              <button
+                                key={cat}
+                                onClick={() => setActiveEditCat(cat)}
+                                type="button"
+                                className={`text-xs px-3 py-1 font-mono rounded-lg border transition-all ${
+                                  isSelected
+                                    ? "bg-primary/20 text-primary border-primary/40 font-bold"
+                                    : "bg-transparent text-muted-foreground border-border hover:bg-secondary"
+                                }`}
+                              >
+                                {cat.toUpperCase()}
+                              </button>
+                            );
+                          })}
                         </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">Cause List for {activeEditCat.toUpperCase()}</span>
+                          <span className="text-xs text-primary font-mono bg-primary/10 px-3 py-1 rounded-full border border-primary/20">
+                            Edit causes inline · Set status to approve
+                          </span>
+                        </div>
+
+                        <div className="space-y-3">
+                          {causes.map((c: any, cIdx: number) => {
+                            const name = typeof c === "string" ? c : c.cause || "";
+                            const status = typeof c === "object" ? c.status || "confirmed" : "confirmed";
+                            const weight = typeof c === "object" ? (c.weight !== undefined ? c.weight : 50) : 50;
+                            const likelihood = typeof c === "object" ? c.likelihood : "Medium";
+                            const subCauses = typeof c === "object" ? c.subCauses || [] : [];
+
+                            const updateCauseValue = (key: string, val: any) => {
+                              const updated = causes.map((item: any, idx: number) => {
+                                if (idx === cIdx) {
+                                  const base = typeof item === "string" ? { cause: item, status: "confirmed", weight: 50, likelihood: "Medium" } : item;
+                                  return { ...base, [key]: val };
+                                }
+                                return item;
+                              });
+                              const updatedCats = { ...fishboneCategories, [activeEditCat]: updated };
+                              setFishboneCategories(updatedCats);
+                              setIsDirty(true);
+                              
+                              const updatedStepData = { ...currentStepData, fishbone: updatedCats };
+                              setFishboneStep({ ...fishboneStep!, data: updatedStepData });
+                              saveInteractiveStepMut.mutate(updatedStepData);
+                            };
+
+                            const removeCauseValue = () => {
+                              const updated = causes.filter((_, idx) => idx !== cIdx);
+                              const updatedCats = { ...fishboneCategories, [activeEditCat]: updated };
+                              setFishboneCategories(updatedCats);
+                              setIsDirty(true);
+                              
+                              const updatedStepData = { ...currentStepData, fishbone: updatedCats };
+                              setFishboneStep({ ...fishboneStep!, data: updatedStepData });
+                              saveInteractiveStepMut.mutate(updatedStepData);
+                            };
+
+                            return (
+                              <div key={cIdx} className="p-5 border-2 border-border/50 rounded-xl bg-background/70 space-y-4 hover:border-primary/30 transition-all">
+                                <div className="flex items-start gap-3">
+                                  <input
+                                    type="text"
+                                    value={name}
+                                    onChange={(e) => updateCauseValue("cause", e.target.value)}
+                                    className="flex-1 bg-transparent border border-border/30 rounded-lg p-3 text-sm font-semibold text-foreground focus:border-primary focus:ring-1 focus:ring-primary/20 focus:outline-none transition-all"
+                                    placeholder="Cause description..."
+                                  />
+                                  <div className="flex flex-col items-center gap-1 shrink-0">
+                                    <select
+                                      value={status}
+                                      onChange={(e) => updateCauseValue("status", e.target.value)}
+                                      className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${
+                                        status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
+                                        status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                        "bg-amber-500/20 text-amber-400 border-amber-500/20"
+                                      }`}
+                                    >
+                                      <option value="pending">⏳ Pending</option>
+                                      <option value="confirmed">✓ Confirmed</option>
+                                      <option value="refuted">✕ Refuted</option>
+                                      <option value="pending_verification">⏳ Pending Verify</option>
+                                    </select>
+                                  </div>
+                                </div>
+
+                                <div className="flex gap-2 pt-1 border-t border-border/20">
+                                  <button
+                                    onClick={() => updateCauseValue("status", "confirmed")}
+                                    type="button"
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
+                                      status === "confirmed"
+                                        ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                                        : status === "refuted"
+                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                          : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
+                                    }`}
+                                    disabled={status === "refuted"}
+                                  >
+                                    {status === "confirmed" ? "✓ Confirmed" : "✓ Confirm"}
+                                  </button>
+                                  <button
+                                    onClick={() => updateCauseValue("status", "refuted")}
+                                    type="button"
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
+                                      status === "refuted"
+                                        ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
+                                        : status === "confirmed"
+                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                          : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
+                                    }`}
+                                    disabled={status === "confirmed"}
+                                  >
+                                    {status === "refuted" ? "✕ Refuted" : "✕ Refute"}
+                                  </button>
+                                  <button
+                                    onClick={removeCauseValue}
+                                    type="button"
+                                    className="text-sm px-4 py-2 rounded-lg bg-muted/80 text-muted-foreground border border-border hover:bg-secondary transition-all font-mono"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          <button
+                            onClick={() => {
+                              const newCause = { cause: "New cause", subCauses: [], status: "pending", weight: 50, likelihood: "Medium" };
+                              const updatedCats = { ...fishboneCategories, [activeEditCat]: [...causes, newCause] };
+                              setFishboneCategories(updatedCats);
+                              setIsDirty(true);
+                              
+                              const updatedStepData = { ...currentStepData, fishbone: updatedCats };
+                              setFishboneStep({ ...fishboneStep!, data: updatedStepData });
+                              saveInteractiveStepMut.mutate(updatedStepData);
+                            }}
+                            type="button"
+                            className="w-full text-sm text-primary/80 hover:text-primary py-4 font-mono flex items-center justify-center gap-2 transition-all border-2 border-dashed border-border/40 rounded-xl hover:border-primary/30"
+                          >
+                            <Plus className="w-4 h-4" /> Add Cause to {activeEditCat.toUpperCase()}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 pt-2.5 border-t border-border/40">
                         <Button
                           size="sm"
-                          className="px-4 py-2.5 h-[40px] shrink-0"
-                          onClick={() => submitFishboneResponse()}
-                          disabled={!selectedFishboneAnswer.trim()}
+                          onClick={() => {
+                            saveFishbone();
+                            toast.success("Findings saved successfully!");
+                          }}
+                          disabled={updateAgentMsgMut.isPending}
                         >
-                          <ChevronRight className="w-4 h-4" />
+                          {updateAgentMsgMut.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <FileCheck2 className="w-4 h-4 mr-2" />}
+                          Save Changes to Database
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setShowInteractiveGuideOverride(false)}
+                        >
+                          Back to Diagram
                         </Button>
                       </div>
-                    </>
-                  )}
-                </div>
+                    </div>
+                  );
+                })()}
+
+                {currentStepType !== "final" && (
+                  <div className="space-y-2 pt-2.5 border-t border-border/40">
+                    {(sendMut.isPending || streamingChatText !== null) ? (
+                      <div className="flex flex-col items-center justify-center p-6 bg-background/50 border border-dashed border-border rounded-lg space-y-3">
+                        <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                        <p className="text-xs text-muted-foreground font-mono italic">
+                          Fishbone agent is analyzing evidence and drafting the next step...
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-xs text-foreground font-bold leading-relaxed">{currentStepData.question || "Proposing next analysis step..."}</p>
+                        
+                        <div className="flex gap-2 items-end">
+                          <div className="flex-1">
+                            <Textarea
+                              value={selectedFishboneAnswer}
+                              onChange={(e) => setSelectedFishboneAnswer(e.target.value)}
+                              placeholder="Provide details, override proposal, or answer the question..."
+                              className="w-full text-xs font-mono p-3 min-h-[70px] bg-background border border-border rounded-lg"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  submitFishboneResponse();
+                                }
+                              }}
+                            />
+                          </div>
+                          <Button
+                            size="sm"
+                            className="px-4 py-2.5 h-[40px] shrink-0"
+                            onClick={() => submitFishboneResponse()}
+                            disabled={!selectedFishboneAnswer.trim()}
+                          >
+                            <ChevronRight className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -2739,8 +2988,24 @@ function CasePage() {
                 <Button size="sm" variant="outline" onClick={addCustomCat}>
                   <Plus className="w-3.5 h-3.5 mr-1" /> Add Category
                 </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setShowInteractiveGuideOverride(true)}
+                  className="border-primary/40 text-primary hover:bg-primary/5 font-semibold"
+                >
+                  <Edit className="w-3.5 h-3.5 mr-1.5" />
+                  Edit Findings
+                </Button>
                 <Button size="sm" onClick={saveFishbone} disabled={updateAgentMsgMut.isPending}>
-                  {updateAgentMsgMut.isPending ? "Saving..." : "Save Findings"}
+                  {updateAgentMsgMut.isPending ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save Findings"
+                  )}
                 </Button>
               </div>
             </div>
@@ -4148,8 +4413,186 @@ function CasePage() {
     }
   };
 
+  // ── Automation progress modal ────────────────────────────────────────────
+  const renderAutoModal = () => {
+    if (!showAutoModal) return null;
+    const isDone = autoProgress.some((e) => e.type === "done");
+    const hasError = autoProgress.some((e) => e.type === "error");
+    const agentStatusMap: Record<string, string> = {};
+    for (const e of autoProgress) {
+      if (e.type === "agent_start" && e.agent) agentStatusMap[e.agent] = "running";
+      if (e.type === "agent_skip" && e.agent) agentStatusMap[e.agent] = "skipped";
+      if (e.type === "agent_complete" && e.agent) agentStatusMap[e.agent] = "complete";
+      if (e.type === "error") Object.keys(agentStatusMap).forEach((k) => { if (agentStatusMap[k] === "running") agentStatusMap[k] = "error"; });
+    }
+    const lastProgress = [...autoProgress].reverse().find((e) => e.type === "agent_progress");
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div className="w-full max-w-lg mx-4 bg-background border border-violet-500/30 rounded-xl shadow-2xl shadow-violet-500/10 overflow-hidden">
+          <div className="p-4 border-b border-border flex items-center justify-between bg-violet-500/5">
+            <div className="flex items-center gap-2">
+              {autoRunning ? (
+                <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+              ) : isDone ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <Zap className="w-4 h-4 text-violet-400" />
+              )}
+              <span className="font-bold text-sm mono">// FULL RCA AUTOMATION</span>
+            </div>
+            {!autoRunning && (
+              <button
+                onClick={() => setShowAutoModal(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+
+          <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
+            {autoProgress.length === 0 && !autoRunning && (
+              <div className="text-center py-6 space-y-3">
+                <div className="w-14 h-14 rounded-full bg-violet-500/10 border border-violet-500/30 flex items-center justify-center mx-auto">
+                  <Zap className="w-7 h-7 text-violet-400" />
+                </div>
+                <div className="space-y-1">
+                  <p className="font-semibold text-sm">Automated Full RCA Pipeline</p>
+                  <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                    AI will automatically run all 8 analysis agents — generating questions, answering them, and producing a complete RCA report with zero manual input.
+                  </p>
+                </div>
+                <div className="text-xs text-muted-foreground/70 bg-secondary/30 rounded-lg p-3 text-left space-y-1">
+                  <p className="font-mono font-semibold text-violet-400/80">// What happens:</p>
+                  <p>• Data Collector validates the incident</p>
+                  <p>• 5-Why drills down to root cause (auto-answered)</p>
+                  <p>• Fishbone builds the Ishikawa diagram (10-step auto-flow)</p>
+                  <p>• FTA, Pareto, Timeline, Equipment analyse in parallel</p>
+                  <p>• Report Generator produces the final CAPA</p>
+                </div>
+              </div>
+            )}
+
+            {AGENTS.map((agent) => {
+              const status = agentStatusMap[agent.key];
+              if (!status && autoProgress.length === 0) return null;
+              const progressEvents = autoProgress.filter(
+                (e) => e.agent === agent.key && e.type === "agent_progress"
+              );
+              const lastStep = progressEvents[progressEvents.length - 1];
+              return (
+                <div
+                  key={agent.key}
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs transition-all ${
+                    status === "complete"
+                      ? "bg-emerald-500/5 border-emerald-500/20"
+                      : status === "running"
+                        ? "bg-violet-500/5 border-violet-500/30"
+                        : status === "skipped"
+                          ? "bg-muted/20 border-border/30 opacity-60"
+                          : status === "error"
+                            ? "bg-red-500/5 border-red-500/30"
+                            : "bg-transparent border-transparent opacity-30"
+                  }`}
+                >
+                  <div className="mt-0.5 shrink-0">
+                    {status === "complete" ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : status === "running" ? (
+                      <Loader2 className="w-3.5 h-3.5 text-violet-400 animate-spin" />
+                    ) : status === "skipped" ? (
+                      <XCircle className="w-3.5 h-3.5 text-muted-foreground/50" />
+                    ) : status === "error" ? (
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                    ) : (
+                      <Circle className="w-3.5 h-3.5 text-muted-foreground/30" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold mono">{agent.shortName}</span>
+                      {status === "skipped" && (
+                        <span className="text-[10px] text-muted-foreground/60">(already done)</span>
+                      )}
+                    </div>
+                    {lastStep?.message && status === "running" && (
+                      <p className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{lastStep.message}</p>
+                    )}
+                  </div>
+                  {status === "running" && lastStep && (
+                    <span className="text-[10px] text-violet-400/70 mono shrink-0">step {lastStep.step}</span>
+                  )}
+                </div>
+              );
+            })}
+
+            {lastProgress && autoRunning && (
+              <div className="text-[10px] text-muted-foreground/60 mono px-1 truncate">
+                {lastProgress.message}
+              </div>
+            )}
+
+            {isDone && (
+              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-3 text-center">
+                <p className="text-sm font-semibold text-emerald-400">Analysis Complete!</p>
+                <p className="text-xs text-muted-foreground mt-1">All agents have completed their analysis. Review each step's findings.</p>
+              </div>
+            )}
+
+            {hasError && (
+              <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                <p className="text-xs text-red-400 font-mono">
+                  {autoProgress.find((e) => e.type === "error")?.message}
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="p-4 border-t border-border flex gap-2 justify-end">
+            {!autoRunning && autoProgress.length === 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAutoModal(false)}
+                className="text-xs"
+              >
+                Cancel
+              </Button>
+            )}
+            {!autoRunning && (
+              <Button
+                size="sm"
+                disabled={autoMut.isPending}
+                onClick={() => {
+                  if (isDone) {
+                    setShowAutoModal(false);
+                  } else {
+                    setAutoProgress([]);
+                    autoMut.mutate();
+                  }
+                }}
+                className="bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold"
+              >
+                {isDone ? (
+                  "Close & Review"
+                ) : (
+                  <>
+                    <Zap className="w-3.5 h-3.5 mr-1.5" />
+                    Start Automation
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col h-[calc(100vh-7rem)] gap-3 animate-fadeIn">
+      {renderAutoModal()}
       {/* Agent Progress Bar */}
       <div className="panel p-3">
         <div className="flex items-center justify-between mb-2">
@@ -4320,6 +4763,22 @@ function CasePage() {
               <FileCheck2 className="w-3.5 h-3.5 mr-1.5" />
               {caseStatus === "completed" ? "Update Report" : "Save Report"}
             </Button>
+            <div className="pt-1 border-t border-border/40">
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full border-violet-500/40 text-violet-400 hover:bg-violet-500/10 hover:border-violet-500/60 font-semibold"
+                onClick={() => { setShowAutoModal(true); }}
+                disabled={autoMut.isPending}
+              >
+                {autoMut.isPending ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <Zap className="w-3.5 h-3.5 mr-1.5" />
+                )}
+                Run Full Analysis
+              </Button>
+            </div>
           </div>
         </div>
 

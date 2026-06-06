@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth-middleware";
 import { getDb, generateId } from "@/lib/database";
-import { getAgentApiBase, AGENT_BY_KEY, type AgentKey } from "@/lib/agents";
+import { getAgentApiBase, AGENT_BY_KEY, RESPONDER_AGENT_ID, type AgentKey } from "@/lib/agents";
 import fs from "fs";
 import path from "path";
 
@@ -16,6 +16,272 @@ const AGENT_KEYS = [
   "equipment",
   "report",
 ] as const;
+
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
+async function callAgentApiRaw(agentKey: AgentKey, prompt: string, chatId: string): Promise<string> {
+  const agent = AGENT_BY_KEY[agentKey];
+  if (!agent?.id) throw new Error(`Agent ${agentKey} is not configured`);
+
+  const res = await fetch(`${getAgentApiBase()}/${agent.id}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      question: prompt,
+      overrideConfig: { sessionId: chatId },
+      chatId,
+      streaming: true,
+    }),
+    signal: AbortSignal.timeout(180000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Agent ${agent.shortName} failed: ${res.status} ${errText.slice(0, 200)}`);
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error(`Agent ${agent.shortName} returned no body`);
+
+  const decoder = new TextDecoder();
+  let fullText = "";
+  let fullRaw = "";
+  let buffer = "";
+  let hasTokens = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    fullRaw += chunk;
+    buffer += chunk;
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(payload);
+        let token = "";
+        if (parsed.event === "token" && typeof parsed.data === "string") {
+          token = parsed.data; hasTokens = true;
+        } else if (parsed.event === "on_chat_model_stream" && parsed.data?.content) {
+          token = parsed.data.content; hasTokens = true;
+        }
+        if (token) fullText += token;
+      } catch {}
+    }
+  }
+
+  if (!hasTokens && fullRaw) {
+    try {
+      const json = JSON.parse(fullRaw);
+      fullText = json.text || json.answer || json.output || JSON.stringify(json);
+    } catch {}
+  }
+
+  return fullText;
+}
+
+function isAgentIterationDone(agentKey: string, parsed: any): boolean {
+  if (!parsed) return false;
+  switch (agentKey) {
+    case "five_why":
+      return (parsed.whyStep >= 5) || parsed.rootCauseIdentified === true;
+    case "fishbone":
+      return parsed.type === "final" || parsed.step === 10;
+    default:
+      return true;
+  }
+}
+
+interface ResponderResult {
+  answerText: string;
+  proceedSignal: "confirm" | "modify" | "custom" | "finalize" | "insufficient_data";
+  selectedOptionId: string | null;
+  confidence: "high" | "medium" | "low";
+  reasoning: string;
+}
+
+async function callAnswererAgent(
+  agentKey: string,
+  agentParsed: any,
+  chatId: string,
+  incidentData: Record<string, any>,
+  caseTitle: string,
+  assetId: string | null,
+  conversationHistory: { role: string; content: string }[],
+  priorFindings: string,
+): Promise<ResponderResult> {
+  const fallback = (answerText: string): ResponderResult => ({
+    answerText,
+    proceedSignal: "confirm",
+    selectedOptionId: null,
+    confidence: "medium",
+    reasoning: "fallback",
+  });
+
+  const prompt = buildResponderPrompt(
+    agentKey,
+    agentParsed,
+    incidentData,
+    caseTitle,
+    assetId,
+    conversationHistory,
+    priorFindings,
+  );
+
+  try {
+    const res = await fetch(
+      `${getAgentApiBase()}/${RESPONDER_AGENT_ID}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: prompt, chatId, streaming: true }),
+        signal: AbortSignal.timeout(120000),
+      },
+    );
+
+    if (!res.ok) return fallback(buildFallbackAnswer(agentKey, agentParsed));
+
+    const reader = res.body?.getReader();
+    if (!reader) return fallback(buildFallbackAnswer(agentKey, agentParsed));
+
+    const decoder = new TextDecoder();
+    let fullText = "";
+    let fullRaw = "";
+    let buffer = "";
+    let hasTokens = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      fullRaw += chunk;
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        try {
+          const p = JSON.parse(payload);
+          let token = "";
+          if (p.event === "token" && typeof p.data === "string") { token = p.data; hasTokens = true; }
+          else if (p.event === "on_chat_model_stream" && p.data?.content) { token = p.data.content; hasTokens = true; }
+          if (token) fullText += token;
+        } catch {}
+      }
+    }
+
+    if (!hasTokens && fullRaw) {
+      try {
+        const j = JSON.parse(fullRaw);
+        fullText = j.text || j.answer || j.output || JSON.stringify(j);
+      } catch {}
+    }
+
+    // Parse responder JSON
+    let cleaned = fullText.trim();
+    const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fence) cleaned = fence[1].trim();
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start !== -1 && end > start) cleaned = cleaned.slice(start, end + 1);
+
+    const parsed = JSON.parse(cleaned);
+
+    if (!parsed.answerText || typeof parsed.answerText !== "string") {
+      return fallback(buildFallbackAnswer(agentKey, agentParsed));
+    }
+
+    return {
+      answerText: parsed.answerText,
+      proceedSignal: parsed.proceedSignal || "confirm",
+      selectedOptionId: parsed.selectedOptionId || null,
+      confidence: parsed.confidence || "medium",
+      reasoning: parsed.reasoning || "",
+    };
+  } catch (err) {
+    console.error("[responder] callAnswererAgent error:", err);
+    return fallback(buildFallbackAnswer(agentKey, agentParsed));
+  }
+}
+
+function buildResponderPrompt(
+  agentKey: string,
+  agentParsed: any,
+  incidentData: Record<string, any>,
+  caseTitle: string,
+  assetId: string | null,
+  conversationHistory: { role: string; content: string }[],
+  priorFindings: string,
+): string {
+  const agent = AGENT_BY_KEY[agentKey as AgentKey];
+  const agentOrder = agent?.order ?? "?";
+  const agentName = agent?.name ?? agentKey;
+  const agentDesc = agent?.description ?? "";
+
+  const inc = incidentData;
+  const lines: string[] = [
+    "## INCIDENT CONTEXT",
+    `Title: ${caseTitle}`,
+    assetId ? `Asset: ${assetId}` : "",
+    inc.problemStatement ? `Problem Statement: ${inc.problemStatement}` : "",
+    inc.effect ? `Effect: ${inc.effect}` : "",
+    inc.equipmentName ? `Equipment: ${inc.equipmentName}` : "",
+    inc.location ? `Location: ${inc.location}` : "",
+    inc.operatingConditions ? `Operating Conditions: ${inc.operatingConditions}` : "",
+    inc.timestamp ? `Failure Timestamp: ${inc.timestamp}` : "",
+    inc.witnessedSymptoms ? `Witnessed Symptoms: ${inc.witnessedSymptoms}` : "",
+    "",
+    `## CURRENT PIPELINE AGENT`,
+    `Agent: ${agentKey} (Step ${agentOrder}/8) — ${agentName}`,
+    `Description: ${agentDesc}`,
+    "",
+    "## PRIOR AGENT FINDINGS",
+    priorFindings || "(none yet)",
+    "",
+    "## CURRENT AGENT MESSAGE (What you must answer)",
+    JSON.stringify(agentParsed, null, 2),
+    "",
+  ];
+
+  if (conversationHistory.length > 0) {
+    lines.push("## CONVERSATION HISTORY IN THIS STEP");
+    for (const m of conversationHistory) {
+      lines.push(`[${m.role === "user" ? "Operator" : "Assistant"}]: ${m.content}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("Respond ONLY with your JSON object.");
+  return lines.filter((l) => l !== undefined).join("\n");
+}
+
+function buildFallbackAnswer(agentKey: string, parsed: any): string {
+  if (agentKey === "five_why") {
+    const step = parsed?.whyStep ?? 1;
+    if (step >= 4) return "Root cause sufficiently identified. Please finalise the 5-Why analysis.";
+    if (parsed?.possibleCauses?.length) {
+      const top = parsed.possibleCauses.find((c: any) => c.likelihood === "High") || parsed.possibleCauses[0];
+      return `I select ${top.id}: ${top.description}. Based on available incident data, this is the most probable cause.`;
+    }
+    return `Cause at Why Step ${step} is confirmed based on available evidence. Please proceed to Why Step ${step + 1}.`;
+  }
+  if (agentKey === "fishbone") {
+    const type = parsed?.type;
+    const cat = parsed?.activeCategory || "this category";
+    if (type === "problem_confirm") return "Confirmed. The problem statement is accurate. Proceed.";
+    if (type === "initial_categories") return "All initial 6M categories confirmed. Proceed to drill down.";
+    if (type === "drill_down") return `All causes in ${cat} confirmed based on incident context. Proceed to next category.`;
+    if (type === "scoring_review") return "All causes reviewed. Proceed with final scoring and produce the fishbone diagram.";
+    return "Confirmed. Please proceed.";
+  }
+  return "Confirmed based on available evidence. Please proceed.";
+}
 
 interface ConversationRow {
   id: string;
@@ -348,8 +614,19 @@ export const createRcaCase = createServerFn({ method: "POST" })
       if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
       }
+      const MIME_TO_EXT: Record<string, string> = {
+        "application/pdf": "pdf",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+        "application/vnd.ms-excel": "xls",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+        "application/msword": "doc",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+        "application/vnd.ms-powerpoint": "ppt",
+        "text/csv": "csv",
+        "text/plain": "txt",
+      };
       for (const att of data.attachments) {
-        const ext = att.contentType.split("/")[1] || "png";
+        const ext = MIME_TO_EXT[att.contentType] || att.contentType.split("/")[1]?.replace(/[^a-z0-9]/g, "") || "bin";
         const fileId = generateId();
         const fileName = `${fileId}.${ext}`;
         const filePath = path.join(uploadDir, fileName);
@@ -1456,6 +1733,411 @@ Output ONLY the raw JSON object, without any markdown formatting or codeblocks. 
           }
         } catch (err: any) {
           controller.error(err);
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+      },
+    });
+  });
+
+// ─── Full Automation ─────────────────────────────────────────────────────────
+
+export const runFullAutomation = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    const db = getDb();
+
+    const rcaCase = db
+      .prepare("SELECT * FROM rca_cases WHERE id = ?")
+      .get(data.caseId) as CaseRow | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId) throw new Error("Forbidden");
+
+    const encoder = new TextEncoder();
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const emit = (event: object) =>
+          controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
+
+        try {
+          let collectorSessionId: string | null = null;
+
+          for (const agentKey of AGENT_KEYS) {
+            const agent = AGENT_BY_KEY[agentKey as AgentKey];
+            emit({ type: "agent_start", agent: agentKey, name: agent.name });
+
+            // Ensure conversation exists
+            let convo = db
+              .prepare(
+                "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+              )
+              .get(data.caseId, agentKey, userId) as ConversationRow | undefined;
+
+            if (!convo) {
+              const convoId = generateId();
+              let sessionId = generateId();
+              if (agentKey !== "data_collector" && collectorSessionId) {
+                sessionId = collectorSessionId;
+              }
+              db.prepare(
+                "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
+              ).run(convoId, userId, agentKey, sessionId, data.caseId, agent.name);
+              convo = db
+                .prepare("SELECT * FROM conversations WHERE id = ?")
+                .get(convoId) as ConversationRow;
+            }
+
+            if (agentKey === "data_collector") collectorSessionId = convo.session_id;
+            const chatId = collectorSessionId ?? convo.session_id;
+
+            // Skip if already has messages
+            const existingCount = (
+              db
+                .prepare("SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?")
+                .get(convo.id) as { cnt: number }
+            ).cnt;
+
+            if (existingCount > 0) {
+              emit({ type: "agent_skip", agent: agentKey, message: "Already analysed — skipping" });
+              continue;
+            }
+
+            // Build initial prompt (mirrors generateAgentHypothesis logic)
+            const currentIdx = AGENT_KEYS.indexOf(agentKey as (typeof AGENT_KEYS)[number]);
+            let prompt = "";
+
+            if (agentKey === "data_collector") {
+              let initialDesc = "";
+              let initialAttachments = "";
+              if (rcaCase.incident_data) {
+                try {
+                  const pd = JSON.parse(rcaCase.incident_data);
+                  initialDesc = pd.description || "";
+                  if (Array.isArray(pd.attachments)) {
+                    initialAttachments = pd.attachments
+                      .map((a: any) => `${a.filename} (${a.url})`)
+                      .join(", ");
+                  }
+                } catch {}
+              }
+              prompt = `You are the Data Collector & Validator agent. Parse the raw incident information, extract key parameters, construct a concise problem statement and operational effect, and identify gaps or follow-up questions.
+IMPORTANT: Respond ONLY with a single JSON object matching this schema exactly:
+{"problemStatement":"...","effect":"...","equipmentName":"...","location":"...","operatingConditions":"...","timestamp":"...","witnessedSymptoms":"...","maintenanceHistoryChecked":false,"gaps":["gap 1"],"followUps":["question 1"]}
+
+Incident Title: ${rcaCase.title}
+${rcaCase.asset_id ? `Asset: ${rcaCase.asset_id}` : ""}
+${initialDesc ? `Description: ${initialDesc}` : ""}
+${initialAttachments ? `Attachments: ${initialAttachments}` : ""}`;
+
+            } else if (agentKey === "five_why") {
+              let ps = "", ef = "", eq = "", lo = "", oc = "", ts = "", ws = "";
+              if (rcaCase.incident_data) {
+                try {
+                  const pi = JSON.parse(rcaCase.incident_data);
+                  ps = pi.problemStatement || pi.description || "";
+                  ef = pi.effect || ""; eq = pi.equipmentName || ""; lo = pi.location || "";
+                  oc = pi.operatingConditions || ""; ts = pi.timestamp || ""; ws = pi.witnessedSymptoms || "";
+                } catch {}
+              }
+              prompt = `You are a 5-Why Analysis agent. Respond ONLY with a single JSON object:
+{"whyStep":1,"question":"Why did the failure event occur?","possibleCauses":[{"id":"cause-a","category":"Equipment","description":"Description","likelihood":"High"}],"operatorInstruction":"Actionable instruction."}
+
+Problem Statement: ${ps}
+Effect: ${ef}
+Equipment: ${eq}
+Location: ${lo}
+Operating Conditions: ${oc}
+Timestamps: ${ts}
+Symptoms: ${ws}
+START FRESH 5 WHY ANALYSIS. Generate only WHY STEP 1.`;
+
+            } else if (agentKey === "fishbone") {
+              let ps = "", ef = "", eq = "", lo = "", oc = "", ts = "", ws = "", fiveWhySummary = "";
+              if (rcaCase.incident_data) {
+                try {
+                  const pi = JSON.parse(rcaCase.incident_data);
+                  ps = pi.problemStatement || pi.description || "";
+                  ef = pi.effect || ""; eq = pi.equipmentName || ""; lo = pi.location || "";
+                  oc = pi.operatingConditions || ""; ts = pi.timestamp || ""; ws = pi.witnessedSymptoms || "";
+                } catch {}
+              }
+              const fwConvo = db
+                .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'five_why'")
+                .get(data.caseId) as { id: string } | undefined;
+              if (fwConvo) {
+                const lm = db
+                  .prepare(
+                    "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+                  )
+                  .get(fwConvo.id) as { content: string } | undefined;
+                if (lm) {
+                  try {
+                    const pw = JSON.parse(lm.content);
+                    fiveWhySummary = `Question: ${pw.question || ""}\nInstruction: ${pw.operatorInstruction || ""}`;
+                  } catch { fiveWhySummary = lm.content; }
+                }
+              }
+              prompt = `You are a Fishbone (Ishikawa) Diagram analysis expert. Conduct the analysis STEP BY STEP.
+PROTOCOL: Progress steps 1-10 sequentially. Always respond with valid JSON only.
+STEP 1 — CONFIRM PROBLEM STATEMENT. Respond ONLY:
+{"step":1,"type":"problem_confirm","proposedProblemStatement":"...","question":"Is this accurate?","nextStep":"Proceed to step 2."}
+STEP 2 — INITIAL 6M CATEGORIES. Respond ONLY:
+{"step":2,"type":"initial_categories","problemStatement":"...","categories":{"manpower":[],"machine":[],"methods":[],"materials":[],"measurements":[],"environment":[]},"question":"Review categories.","nextStep":"Proceed to step 3."}
+STEPS 3-8 — DRILL DOWN ONE CATEGORY AT A TIME. Respond ONLY:
+{"step":N,"type":"drill_down","activeCategory":"machine","completedCategories":[],"pendingCategories":[],"refinedCauses":[{"cause":"...","subCauses":[],"status":"confirmed"}],"question":"...","operatorInstruction":"...","nextStep":"..."}
+STEP 9 — SCORING REVIEW. Respond ONLY:
+{"step":9,"type":"scoring_review","question":"Review before scores.","fullCauseSummary":{},"nextStep":"Proceed to step 10."}
+STEP 10 — FINAL OUTPUT (no more interaction). Respond ONLY:
+{"step":10,"type":"final","problemStatement":"...","fishbone":{"manpower":[{"cause":"...","likelihood":"High","weight":75,"subCauses":[],"evidence":"..."}],"machine":[],"methods":[],"materials":[],"measurements":[],"environment":[]}}
+INCIDENT CONTEXT:
+Title: ${rcaCase.title}
+Problem: ${ps}
+Effect: ${ef}
+Equipment: ${eq}
+Location: ${lo}
+Conditions: ${oc}
+Timestamps: ${ts}
+Symptoms: ${ws}
+5-Why Findings: ${fiveWhySummary}
+BEGIN WITH STEP 1 NOW.`;
+
+            } else {
+              prompt = `You are an expert industrial reliability engineer performing a Root Cause Analysis step: ${agent.name} (${agent.description}).\n\nAnalyse the findings from the preceding RCA pipeline steps:\n\n`;
+              for (let i = 0; i < currentIdx; i++) {
+                const prevKey = AGENT_KEYS[i];
+                const prevAgent = AGENT_BY_KEY[prevKey as AgentKey];
+                const prevConvo = db
+                  .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ?")
+                  .get(data.caseId, prevKey) as { id: string } | undefined;
+                if (prevConvo) {
+                  const prevMsgs = db
+                    .prepare(
+                      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                    )
+                    .all(prevConvo.id) as { role: string; content: string }[];
+                  if (prevMsgs.length) {
+                    prompt += `=== ${prevAgent.name} ===\n`;
+                    for (const m of prevMsgs) {
+                      prompt += `[${m.role === "user" ? "Operator" : "Assistant"}]: ${m.content}\n`;
+                    }
+                    prompt += "\n";
+                  }
+                }
+              }
+              prompt += `\nUsing the preceding findings, perform your analysis for ${agent.name}.\n`;
+
+              if (agentKey === "fault_tree") {
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"tree":{"id":"top-event","label":"Primary failure event","type":"gate","gateType":"OR","probability":1.0,"children":[{"id":"sub-1","label":"Sub-event","type":"gate","gateType":"AND","probability":0.3,"children":[{"id":"leaf-1","label":"Root cause","type":"event","probability":0.1}]}]}}`;
+              } else if (agentKey === "pareto") {
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"paretoAnalysis":{"byFailureMode":[{"mode":"Failure Mode A","frequency":12},{"mode":"Failure Mode B","frequency":4}]}}`;
+              } else if (agentKey === "timeline") {
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"timeline":{"phases":[{"phase":"Pre-Incident","start":"T-60m","duration":"55m","description":"Steady state","events":["08:00: Nominal"]},{"phase":"Trigger","start":"T-5m","duration":"5m","description":"Failure onset","events":["08:55: Failure"]}]}}`;
+              } else if (agentKey === "equipment") {
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"reliabilityMetrics":{"rpnScores":{"probe":30,"valve":85,"controller":40}}}`;
+              } else if (agentKey === "report") {
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"rootCause":"Confirmed root cause statement","correctiveActionsList":[{"id":"capa-1","desc":"Corrective action","owner":"Ops Team","date":"2026-06-01","status":"Pending"}],"checklist":{"rootCauseMapped":true,"capaFeasible":true,"redundancyMet":true}}`;
+              }
+            }
+
+            // Save user message
+            db.prepare(
+              "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
+            ).run(
+              generateId(),
+              convo.id,
+              agentKey === "five_why" || agentKey === "fishbone"
+                ? prompt
+                : "[Auto-Pipeline Hypothesis Generation Request]",
+            );
+
+            emit({ type: "agent_progress", agent: agentKey, step: 1, message: "Calling agent API…" });
+
+            let responseText = await callAgentApiRaw(agentKey as AgentKey, prompt, chatId);
+            let parsed: any = null;
+            try {
+              parsed = JSON.parse(responseText);
+              responseText = JSON.stringify(parsed, null, 2);
+            } catch {}
+
+            db.prepare(
+              "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
+            ).run(
+              generateId(),
+              convo.id,
+              responseText,
+              JSON.stringify(parsed ?? { text: responseText }),
+            );
+
+            // Multi-step AI-responder loop for five_why and fishbone
+            if (agentKey === "five_why" || agentKey === "fishbone") {
+              const maxIterations = agentKey === "five_why" ? 7 : 12;
+              let iteration = 0;
+              let shouldFinalize = false;
+
+              // Build incident data for responder context
+              let incidentData: Record<string, any> = {};
+              try { incidentData = JSON.parse(rcaCase.incident_data || "{}"); } catch {}
+
+              // Build prior agent findings summary for responder
+              const buildPriorFindings = () => {
+                let pf = "";
+                for (let i = 0; i < currentIdx; i++) {
+                  const pk = AGENT_KEYS[i];
+                  const pa = AGENT_BY_KEY[pk as AgentKey];
+                  const pc = db
+                    .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ?")
+                    .get(data.caseId, pk) as { id: string } | undefined;
+                  if (pc) {
+                    const lm = db
+                      .prepare(
+                        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+                      )
+                      .get(pc.id) as { content: string } | undefined;
+                    if (lm) pf += `=== ${pa?.name} ===\n${lm.content}\n\n`;
+                  }
+                }
+                return pf;
+              };
+
+              while (
+                !isAgentIterationDone(agentKey, parsed) &&
+                !shouldFinalize &&
+                iteration < maxIterations
+              ) {
+                iteration++;
+
+                // Fetch current conversation history for responder context
+                const historyMsgs = db
+                  .prepare(
+                    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                  )
+                  .all(convo.id) as { role: string; content: string }[];
+
+                emit({
+                  type: "agent_progress",
+                  agent: agentKey,
+                  step: iteration + 1,
+                  message: `Responder analysing ${agentKey} step ${parsed?.whyStep ?? parsed?.step ?? iteration}…`,
+                });
+
+                // Ask the AI responder to generate the operator answer
+                const responder = await callAnswererAgent(
+                  agentKey,
+                  parsed,
+                  chatId,
+                  incidentData,
+                  rcaCase.title,
+                  rcaCase.asset_id,
+                  historyMsgs,
+                  buildPriorFindings(),
+                );
+
+                shouldFinalize = responder.proceedSignal === "finalize";
+                const autoAnswer = responder.answerText;
+
+                emit({
+                  type: "agent_progress",
+                  agent: agentKey,
+                  step: iteration + 1,
+                  message: `[${responder.confidence}] ${autoAnswer.slice(0, 80)}…`,
+                });
+
+                // Save responder answer as operator message
+                db.prepare(
+                  "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
+                ).run(generateId(), convo.id, autoAnswer);
+
+                if (shouldFinalize) break;
+
+                // Build continuation prompt for the analysis agent (mirrors sendAgentMessage)
+                const updatedMsgs = db
+                  .prepare(
+                    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                  )
+                  .all(convo.id) as { role: string; content: string }[];
+
+                let contPrompt = "";
+                if (agentKey === "five_why") {
+                  contPrompt = autoAnswer;
+                } else {
+                  contPrompt = "Here is the conversation history for this agent session so far:\n\n";
+                  for (const m of updatedMsgs) {
+                    contPrompt += `[${m.role === "user" ? "Operator" : "Assistant"}]: ${m.content}\n`;
+                  }
+                  contPrompt += `\nOperator's new message: ${autoAnswer}\n\nPlease reply based on the history above and provide the requested analysis.`;
+                }
+
+                let nextText = await callAgentApiRaw(agentKey as AgentKey, contPrompt, chatId);
+                let nextParsed: any = null;
+                try {
+                  nextParsed = JSON.parse(nextText);
+                  nextText = JSON.stringify(nextParsed, null, 2);
+                } catch {}
+
+                db.prepare(
+                  "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
+                ).run(
+                  generateId(),
+                  convo.id,
+                  nextText,
+                  JSON.stringify(nextParsed ?? { text: nextText }),
+                );
+
+                parsed = nextParsed;
+              }
+            }
+
+            db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(
+              convo.id,
+            );
+
+            // After data_collector, persist structured findings to case incident_data
+            if (agentKey === "data_collector" && parsed) {
+              let existingDesc = "";
+              let existingAttachments: any[] = [];
+              if (rcaCase.incident_data) {
+                try {
+                  const ex = JSON.parse(rcaCase.incident_data);
+                  existingDesc = ex.description || "";
+                  existingAttachments = ex.attachments || [];
+                } catch {}
+              }
+              db.prepare("UPDATE rca_cases SET incident_data = ? WHERE id = ?").run(
+                JSON.stringify({
+                  description: existingDesc,
+                  attachments: existingAttachments,
+                  problemStatement: parsed.problemStatement || "",
+                  effect: parsed.effect || "",
+                  gaps: parsed.gaps || [],
+                  followUps: parsed.followUps || [],
+                  locked: false,
+                  equipmentName: parsed.equipmentName || "",
+                  location: parsed.location || "",
+                  operatingConditions: parsed.operatingConditions || "",
+                  timestamp: parsed.timestamp || "",
+                  witnessedSymptoms: parsed.witnessedSymptoms || "",
+                  maintenanceHistoryChecked: false,
+                }),
+                data.caseId,
+              );
+            }
+
+            emit({ type: "agent_complete", agent: agentKey, name: agent.name });
+          }
+
+          emit({ type: "done", message: "Full RCA automation complete — review each agent's findings." });
+        } catch (err: any) {
+          emit({ type: "error", message: err.message || "Automation failed" });
         } finally {
           controller.close();
         }

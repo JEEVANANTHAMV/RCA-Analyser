@@ -91,3 +91,7 @@ export const AGENTS: AgentDef[] = [
 export const AGENT_BY_KEY: Record<AgentKey, AgentDef> = Object.fromEntries(
   AGENTS.map((a) => [a.key, a]),
 ) as Record<AgentKey, AgentDef>;
+
+// Responder agent — answers questions posed by analysis agents during automation
+export const RESPONDER_AGENT_ID =
+  process.env.AGENT_ID_RESPONDER || "bce5d474-726d-4b3e-ab97-b2a493aa0c09";

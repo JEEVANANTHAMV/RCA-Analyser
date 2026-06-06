@@ -120,8 +120,8 @@ function DashboardPage() {
     const files = e.target.files;
     if (!files) return;
     Array.from(files).forEach((file) => {
-      if (file.size > 10 * 1024 * 1024) {
-        toast.error(`${file.name} exceeds 10MB limit`);
+      if (file.size > 50 * 1024 * 1024) {
+        toast.error(`${file.name} exceeds 50MB limit`);
         return;
       }
       const reader = new FileReader();
@@ -145,8 +145,8 @@ function DashboardPage() {
       if (item.type.indexOf("image") !== -1) {
         const file = item.getAsFile();
         if (file) {
-          if (file.size > 10 * 1024 * 1024) {
-            toast.error("Pasted image exceeds 10MB limit");
+          if (file.size > 50 * 1024 * 1024) {
+            toast.error("Pasted image exceeds 50MB limit");
             continue;
           }
           const reader = new FileReader();
@@ -350,12 +350,12 @@ function DashboardPage() {
             </div>
             <div className="space-y-2">
               <label className="text-xs text-muted-foreground mono flex items-center gap-1">
-                <Paperclip className="w-3.5 h-3.5" /> // ATTACH INITIAL PHOTOS
+                <Paperclip className="w-3.5 h-3.5" /> // ATTACH FILES (photos, docs, reports)
               </label>
               <input
                 type="file"
                 multiple
-                accept="image/*"
+                accept="image/*,.pdf,.xlsx,.xls,.docx,.doc,.csv,.txt,.pptx,.ppt"
                 className="hidden"
                 ref={fileInputRef}
                 onChange={handleFileChange}
@@ -367,26 +367,36 @@ function DashboardPage() {
                   size="sm"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  Choose Images
+                  Choose Files
                 </Button>
                 <span className="text-xs text-muted-foreground">
-                  (Drag-and-drop or select photo files to associate with this case)
+                  Images, PDF (max 120 pages), Excel, Word, CSV — up to 50MB each
                 </span>
               </div>
-              {attachmentsPreview.length > 0 && (
+              {attachments.length > 0 && (
                 <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mt-2">
-                  {attachmentsPreview.map((src, idx) => (
-                    <div key={idx} className="relative group border border-border rounded overflow-hidden aspect-video bg-background/50">
-                      <img src={src} className="w-full h-full object-cover" alt="attachment" />
-                      <button
-                        type="button"
-                        onClick={() => removeAttachment(idx)}
-                        className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded-full p-0.5"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </div>
-                  ))}
+                  {attachments.map((att, idx) => {
+                    const isImage = att.contentType.startsWith("image/");
+                    return (
+                      <div key={idx} className="relative group border border-border rounded overflow-hidden aspect-video bg-background/50 flex items-center justify-center">
+                        {isImage ? (
+                          <img src={attachmentsPreview[idx] || ""} className="w-full h-full object-cover" alt="attachment" />
+                        ) : (
+                          <div className="flex flex-col items-center justify-center p-1 text-center">
+                            <FileText className="w-6 h-6 text-primary/70 mb-1" />
+                            <span className="text-[9px] text-muted-foreground truncate w-full px-1 text-center">{att.filename}</span>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(idx)}
+                          className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
