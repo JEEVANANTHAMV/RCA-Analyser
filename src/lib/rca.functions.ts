@@ -887,6 +887,15 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
 
       let initialDesc = "";
       let initialAttachments = "";
+      let preAnalyzedProblemStatement = "";
+      let preAnalyzedEffect = "";
+      let preAnalyzedEquipmentName = "";
+      let preAnalyzedLocation = "";
+      let preAnalyzedOperatingConditions = "";
+      let preAnalyzedTimestamp = "";
+      let preAnalyzedWitnessedSymptoms = "";
+      let preAnalyzedGaps: string[] = [];
+      let preAnalyzedFollowUps: string[] = [];
       if (rcaCase.incident_data) {
         try {
           const parsedData = JSON.parse(rcaCase.incident_data);
@@ -894,12 +903,23 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
           if (Array.isArray(parsedData.attachments)) {
             initialAttachments = parsedData.attachments.map((a: any) => `${a.filename} (${a.url})`).join(", ");
           }
+          preAnalyzedProblemStatement = parsedData.problemStatement || "";
+          preAnalyzedEffect = parsedData.effect || "";
+          preAnalyzedEquipmentName = parsedData.equipmentName || "";
+          preAnalyzedLocation = parsedData.location || "";
+          preAnalyzedOperatingConditions = parsedData.operatingConditions || "";
+          preAnalyzedTimestamp = parsedData.timestamp || "";
+          preAnalyzedWitnessedSymptoms = parsedData.witnessedSymptoms || "";
+          preAnalyzedGaps = Array.isArray(parsedData.gaps) ? parsedData.gaps : [];
+          preAnalyzedFollowUps = Array.isArray(parsedData.followUps) ? parsedData.followUps : [];
         } catch {
           initialDesc = rcaCase.incident_data;
         }
       }
 
-      prompt = `You are the Data Collector & Validator agent. Your job is to parse the raw incident information, extract key parameters, validate them, construct a concise problem statement and operational effect, and identify gaps or follow-up questions.
+      const hasPreAnalysis = !!(preAnalyzedProblemStatement || preAnalyzedEquipmentName || preAnalyzedLocation);
+
+      prompt = `You are the Data Collector & Validator agent. Your job is to validate and enrich the incident data, confirm pre-analyzed findings, and identify any remaining gaps or follow-up questions.
 IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown block, explanations, or prose. The JSON must exactly conform to this schema:
 {
   "problemStatement": "A concise problem statement of the failure",
@@ -914,11 +934,26 @@ IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in ma
   "followUps": ["Operator follow-up question 1", "Operator follow-up question 2"]
 }
 
-Incident Details to analyze:
+${hasPreAnalysis ? `PRE-ANALYZED DATA (already extracted from incident documents — use these values directly, only override if clearly incorrect):
+Problem Statement: ${preAnalyzedProblemStatement || "Not extracted"}
+Operational Effect: ${preAnalyzedEffect || "Not extracted"}
+Equipment Tag / Name: ${preAnalyzedEquipmentName || "Unknown"}
+Location / Process Unit: ${preAnalyzedLocation || "Unknown"}
+Operating Conditions at Failure: ${preAnalyzedOperatingConditions || "Unknown"}
+Failure Timestamp: ${preAnalyzedTimestamp || "Unknown"}
+Witnessed Symptoms / Telex Logs: ${preAnalyzedWitnessedSymptoms || "Unknown"}
+${preAnalyzedGaps.length > 0 ? `Previously Identified Gaps:\n${preAnalyzedGaps.map(g => `- ${g}`).join("\n")}` : ""}
+${preAnalyzedFollowUps.length > 0 ? `Previously Suggested Follow-Ups:\n${preAnalyzedFollowUps.map(f => `- ${f}`).join("\n")}` : ""}
+
+INSTRUCTIONS: The pre-analyzed fields above are already confirmed. Carry them forward exactly as-is in your JSON response. Focus your analysis on validating correctness and identifying any NEW gaps or missing information not already covered.
+` : `Incident Details to analyze:
 Incident Title: ${rcaCase.title}
 ${rcaCase.asset_id ? `Asset Identifier: ${rcaCase.asset_id}` : ""}
 ${initialDesc ? `Incident Description: ${initialDesc}` : ""}
-${initialAttachments ? `Incident Initial Photos/Attachments: ${initialAttachments}` : ""}
+${initialAttachments ? `Incident Attachments: ${initialAttachments}` : ""}
+`}
+${hasPreAnalysis && initialDesc ? `Additional Raw Description: ${initialDesc}` : ""}
+${hasPreAnalysis && initialAttachments ? `Attachments: ${initialAttachments}` : ""}
 `;
     } else if (data.agentKey === "five_why") {
       const rcaCase = db
@@ -1182,45 +1217,48 @@ BEGIN WITH STEP 1 NOW. Output only the STEP 1 JSON.`;
       prompt += `\nUsing the preceding findings and full history above, perform your analysis for ${agent.name}.\n`;
 
       if (data.agentKey === "fault_tree") {
-        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. The JSON must exactly conform to this schema:
+        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. Build the fault tree using ACTUAL failure causes identified in the preceding analysis — every label must be specific to this incident, not generic. The top-event probability must be 1.0. Child probabilities must be estimated from evidence (0.01–0.99). The JSON must exactly conform to this schema:
 {
   "tree": {
     "id": "top-event",
-    "label": "The primary/top failure event description",
+    "label": "Specific description of the primary failure event for THIS incident",
     "type": "gate",
     "gateType": "OR",
     "probability": 1.0,
     "children": [
       {
         "id": "sub-event-1",
-        "label": "Description of contributing sub-event 1",
+        "label": "Specific contributing cause identified in Fishbone/5-Why",
         "type": "gate",
         "gateType": "AND",
-        "probability": 0.3,
+        "probability": 0.65,
         "children": [
           {
             "id": "leaf-event-1",
-            "label": "Description of root leaf cause",
+            "label": "Specific root leaf cause from the analysis",
             "type": "event",
-            "probability": 0.1
+            "probability": 0.45
           }
         ]
       }
     ]
   }
-}`;
+}
+Generate at least 3 top-level child branches and at least 2 leaf events per branch. All labels must reference specific findings from the preceding steps.`;
       } else if (data.agentKey === "pareto") {
-        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. The JSON must exactly conform to this schema:
+        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. List the actual failure modes identified in the Fishbone and 5-Why analyses with estimated frequency/severity weights — frequencies MUST be non-zero integers derived from evidence strength (range 1–20 per mode). The JSON must exactly conform to this schema:
 {
   "paretoAnalysis": {
     "byFailureMode": [
-      { "mode": "Failure Mode A (e.g. Mechanical Valve Impingement)", "frequency": 12 },
-      { "mode": "Failure Mode B (e.g. Temperature Sensor Calibration Drift)", "frequency": 4 }
+      { "mode": "Specific failure mode from THIS incident analysis", "frequency": 12 },
+      { "mode": "Second identified failure mode", "frequency": 7 },
+      { "mode": "Third identified failure mode", "frequency": 4 }
     ]
   }
-}`;
+}
+Include ALL failure modes identified across all preceding steps. Assign higher frequencies to causes with stronger evidence.`;
       } else if (data.agentKey === "timeline") {
-        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. The JSON must exactly conform to this schema:
+        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. Reconstruct the actual chronological sequence of events for THIS specific incident using all known timestamps, symptoms, and findings from the preceding analysis. Each phase must have at least 2 specific events. The JSON must exactly conform to this schema:
 {
   "timeline": {
     "phases": [
@@ -1228,40 +1266,172 @@ BEGIN WITH STEP 1 NOW. Output only the STEP 1 JSON.`;
         "phase": "Pre-Incident Operations",
         "start": "T-60m",
         "duration": "55m",
-        "description": "Steady state operations",
+        "description": "Normal operating conditions before failure",
         "events": [
-          "08:00 UTC: Nominal feed rate and temperatures"
+          "T-60m: Specific operational state from the incident context",
+          "T-30m: Specific observation or reading"
         ]
       },
       {
         "phase": "Trigger Event",
         "start": "T-5m",
         "duration": "5m",
-        "description": "Onset of failure",
+        "description": "Onset of the failure condition",
         "events": [
-          "08:55 UTC: Localized tube overheating trip"
+          "T-5m: First symptom observed (from witnessed symptoms field)",
+          "T-0m: Failure event occurred"
+        ]
+      },
+      {
+        "phase": "Incident & Response",
+        "start": "T+0m",
+        "duration": "30m",
+        "description": "Immediate post-failure response",
+        "events": [
+          "T+5m: Operator response action",
+          "T+20m: Shutdown or containment"
         ]
       }
     ]
   }
-}`;
+}
+Use the exact timestamps, symptoms, and equipment names from the incident. Generate at least 4 phases with at least 2 events each.`;
       } else if (data.agentKey === "equipment") {
-        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. The JSON must exactly conform to this schema:
+        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. Derive ALL values from the incident context and preceding findings above — do not use placeholder numbers. The JSON must exactly conform to this schema:
 {
   "reliabilityMetrics": {
+    "mtbf": { "value": "720 hrs", "trend": "Decreasing — failure rate above historical average" },
+    "mttr": { "value": "4.5 hrs", "trend": "Stable — within SLA" },
+    "availability": { "value": "99.2%", "trend": "Below 99.5% target" },
+    "failureRate": { "value": "0.0014 /hr", "trend": "Increasing — PM overdue" },
     "rpnScores": {
       "probe": 30,
       "valve": 85,
       "controller": 40
     }
   }
-}`;
+}
+Replace every numeric value and trend string with incident-specific estimates. rpnScores keys must be exactly "probe", "valve", and "controller" with integer values 1–100.`;
       } else if (data.agentKey === "report") {
-        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not wrap it in markdown, explanations, or prose. The JSON must exactly conform to this schema:
+        prompt += `IMPORTANT: You MUST respond ONLY with a single JSON object. Do not add any prose, markdown, or explanation. Synthesise ALL preceding agent findings into a comprehensive RCA report. The JSON must exactly conform to this schema — fill EVERY field with incident-specific values derived from the analysis above:
 {
-  "rootCause": "Clear statement of the confirmed root cause of the failure",
+  "rcaReport": {
+    "header": {
+      "rcaNumber": "HZL/<PLANT>/<EQUIP>/<Mon-YY>",
+      "plant": "<plant name from incident>",
+      "initiationDate": "<YYYY-MM-DD>",
+      "submissionDate": "<YYYY-MM-DD>",
+      "department": "<department from incident>",
+      "section": "<section/area from incident>",
+      "z2NotificationNumber": "",
+      "zrNumber": ""
+    },
+    "equipment": {
+      "number": "<equipment tag/number>",
+      "name": "<full equipment name>",
+      "occurrenceDateTime": "<date and time of failure>",
+      "restorationDateTime": "<date and time restored>",
+      "productionAffectedHours": "<e.g. 27 hours>",
+      "affectsProduction": "Yes"
+    },
+    "problemDescription": "<1-2 sentence clear description of what failed and observed symptoms>",
+    "immediateActions": [
+      { "action": "<corrective action taken immediately>", "who": "<person/team>", "when": "<date/time>" }
+    ],
+    "costOfFailure": {
+      "sparePartCost": 0,
+      "serviceCost": 0,
+      "manpowerCost": 0,
+      "productionLoss": 0
+    },
+    "chronologyEvents": [
+      { "srNo": 1, "event": "<specific event from incident context>", "date": "<YYYY-MM-DD>", "time": "<HH:MM>" },
+      { "srNo": 2, "event": "<next event>", "date": "<YYYY-MM-DD>", "time": "<HH:MM>" }
+    ],
+    "teamMembers": [
+      { "no": 1, "name": "<name>", "department": "<dept>", "type": "BP" }
+    ],
+    "maintenanceHistory": {
+      "lastPMDate": "<YYYY-MM-DD>",
+      "lastPMObservations": "<PM findings>",
+      "cbmDate": "<YYYY-MM-DD>",
+      "cbmStatus": "Normal",
+      "rootCauseIdentifiableByCBM": "No"
+    },
+    "lastFailure": {
+      "date": "<YYYY-MM-DD or Unknown>",
+      "detail": "<description of last failure>",
+      "rootCause": "<root cause of last failure>"
+    },
+    "fmeaExists": "NA",
+    "currentFailureInFMEA": "NA",
+    "whyWhyAnalysis": {
+      "problem": "<problem statement from data_collector>",
+      "stream1": {
+        "why1": "<first level cause>",
+        "why2": "<second level>",
+        "why3": "<third level>",
+        "why4": "<fourth level>",
+        "why5": "<root cause level>"
+      },
+      "stream2": {
+        "why1": "<parallel cause chain>",
+        "why2": "<second level>",
+        "why3": "<third level>",
+        "why4": "",
+        "why5": ""
+      }
+    },
+    "rootCauses": [
+      "<Primary root cause — specific to this incident>",
+      "<Contributing root cause if any>",
+      "",
+      ""
+    ],
+    "fishboneCategories": {
+      "manpower": ["<skill/knowledge gap if applicable>"],
+      "machine": ["<equipment deficiency that contributed>"],
+      "method": ["<process or procedure gap>"],
+      "material": ["<material or spare part issue>"],
+      "measurement": ["<monitoring or detection gap>"],
+      "environment": ["<environmental factor if any>"]
+    },
+    "rootCauseCloseout": {
+      "selectedCategories": ["machine", "method"]
+    },
+    "actionPlan": [
+      {
+        "srNo": 1,
+        "action": "<corrective action — CA = address root cause>",
+        "type": "CA",
+        "classification": "NA",
+        "responsible": "<person/team>",
+        "department": "<dept>",
+        "target": "<YYYY-MM-DD>",
+        "status": "Pending"
+      },
+      {
+        "srNo": 2,
+        "action": "<preventive action — PA = prevent recurrence>",
+        "type": "PA",
+        "classification": "NA",
+        "responsible": "<person/team>",
+        "department": "<dept>",
+        "target": "<YYYY-MM-DD>",
+        "status": "In Progress"
+      }
+    ],
+    "horizontalDeployment": "<describe which other similar equipment/areas this applies to>",
+    "preventiveMeasures": "<PM/CBM/inspection changes to prevent recurrence>",
+    "sustainableMeasures": "<SOP/SMP/WI updates required>",
+    "externalInvestigationRequired": "No",
+    "externalTestingRequired": "No",
+    "changesRequiredInODC": "No",
+    "changesRequiredInFMEA": "No"
+  },
+  "rootCause": "<same as rootCauses[0] — kept for backward compatibility>",
   "correctiveActionsList": [
-    { "id": "capa-1", "desc": "Inspect burner tips and gas ratio settings", "owner": "Ops Team", "date": "2026-06-01", "status": "Pending" }
+    { "id": "capa-1", "desc": "<action description>", "owner": "<owner>", "date": "<YYYY-MM-DD>", "status": "Pending" }
   ],
   "checklist": {
     "rootCauseMapped": true,
@@ -1279,14 +1449,20 @@ BEGIN WITH STEP 1 NOW. Output only the STEP 1 JSON.`;
       "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
     ).run(msgId, convo.id, userMsgContent);
 
-    let chatId = convo.session_id;
-    if (convo.agent_key !== "data_collector" && convo.rca_case_id) {
+    // Structured single-shot agents must not inherit stale session history from prior runs.
+    // Give them a fresh chatId every time; conversation agents (data_collector, five_why, fishbone)
+    // keep the shared collector session so context flows between turns.
+    const STRUCTURED_AGENTS = ["fault_tree", "pareto", "timeline", "equipment", "report"];
+    let chatId: string;
+    if (STRUCTURED_AGENTS.includes(data.agentKey)) {
+      chatId = `${convo.session_id}-${generateId()}`;
+    } else if (convo.agent_key !== "data_collector" && convo.rca_case_id) {
       const collector = db
         .prepare("SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
         .get(convo.rca_case_id) as { session_id: string } | undefined;
-      if (collector?.session_id) {
-        chatId = collector.session_id;
-      }
+      chatId = collector?.session_id ?? convo.session_id;
+    } else {
+      chatId = convo.session_id;
     }
 
     // 4. Send request to agent API
@@ -1376,6 +1552,13 @@ BEGIN WITH STEP 1 NOW. Output only the STEP 1 JSON.`;
           // Save final response in DB
           let parsedResponse: Record<string, any> = {};
           let assistantText = fullText || "";
+
+          // Strip leading prose before first JSON brace (handles "Synthesizing…" preamble)
+          if (STRUCTURED_AGENTS.includes(data.agentKey)) {
+            const jsonStart = assistantText.indexOf("{");
+            if (jsonStart > 0) assistantText = assistantText.slice(jsonStart);
+          }
+
           try {
             parsedResponse = JSON.parse(assistantText);
             assistantText = JSON.stringify(parsedResponse, null, 2);
@@ -1798,7 +1981,11 @@ export const runFullAutomation = createServerFn({ method: "POST" })
             }
 
             if (agentKey === "data_collector") collectorSessionId = convo.session_id;
-            const chatId = collectorSessionId ?? convo.session_id;
+            // Structured single-shot agents get a fresh chatId to avoid stale session contamination.
+            const STRUCTURED_AGENTS_FA = ["fault_tree", "pareto", "timeline", "equipment", "report"];
+            const chatId = STRUCTURED_AGENTS_FA.includes(agentKey)
+              ? `${convo.session_id}-${generateId()}`
+              : (collectorSessionId ?? convo.session_id);
 
             // Skip if already has messages
             const existingCount = (
@@ -1819,25 +2006,48 @@ export const runFullAutomation = createServerFn({ method: "POST" })
             if (agentKey === "data_collector") {
               let initialDesc = "";
               let initialAttachments = "";
+              let prePS = "", preEffect = "", preEquip = "", preLoc = "", preOpCond = "", preTs = "", preSymptoms = "";
+              let preGaps: string[] = [], preFollowUps: string[] = [];
               if (rcaCase.incident_data) {
                 try {
                   const pd = JSON.parse(rcaCase.incident_data);
                   initialDesc = pd.description || "";
                   if (Array.isArray(pd.attachments)) {
-                    initialAttachments = pd.attachments
-                      .map((a: any) => `${a.filename} (${a.url})`)
-                      .join(", ");
+                    initialAttachments = pd.attachments.map((a: any) => `${a.filename} (${a.url})`).join(", ");
                   }
+                  prePS = pd.problemStatement || "";
+                  preEffect = pd.effect || "";
+                  preEquip = pd.equipmentName || "";
+                  preLoc = pd.location || "";
+                  preOpCond = pd.operatingConditions || "";
+                  preTs = pd.timestamp || "";
+                  preSymptoms = pd.witnessedSymptoms || "";
+                  preGaps = Array.isArray(pd.gaps) ? pd.gaps : [];
+                  preFollowUps = Array.isArray(pd.followUps) ? pd.followUps : [];
                 } catch {}
               }
-              prompt = `You are the Data Collector & Validator agent. Parse the raw incident information, extract key parameters, construct a concise problem statement and operational effect, and identify gaps or follow-up questions.
+              const hasPreAnalysis = !!(prePS || preEquip || preLoc);
+              prompt = `You are the Data Collector & Validator agent. Validate and enrich the incident data. Do NOT ask for user input — use all available information to produce a complete response.
 IMPORTANT: Respond ONLY with a single JSON object matching this schema exactly:
 {"problemStatement":"...","effect":"...","equipmentName":"...","location":"...","operatingConditions":"...","timestamp":"...","witnessedSymptoms":"...","maintenanceHistoryChecked":false,"gaps":["gap 1"],"followUps":["question 1"]}
 
-Incident Title: ${rcaCase.title}
+${hasPreAnalysis ? `PRE-ANALYZED DATA (carry these forward exactly — only override if clearly incorrect):
+Problem Statement: ${prePS}
+Effect: ${preEffect}
+Equipment: ${preEquip}
+Location: ${preLoc}
+Operating Conditions: ${preOpCond}
+Timestamp: ${preTs}
+Witnessed Symptoms: ${preSymptoms}
+${preGaps.length > 0 ? `Gaps: ${preGaps.join("; ")}` : ""}
+${preFollowUps.length > 0 ? `Follow-Ups: ${preFollowUps.join("; ")}` : ""}
+` : `Incident Title: ${rcaCase.title}
 ${rcaCase.asset_id ? `Asset: ${rcaCase.asset_id}` : ""}
 ${initialDesc ? `Description: ${initialDesc}` : ""}
-${initialAttachments ? `Attachments: ${initialAttachments}` : ""}`;
+${initialAttachments ? `Attachments: ${initialAttachments}` : ""}
+`}${hasPreAnalysis && initialDesc ? `Additional Description: ${initialDesc}` : ""}
+${hasPreAnalysis && initialAttachments ? `Attachments: ${initialAttachments}` : ""}
+Focus on identifying any remaining gaps — do not ask the user for clarification mid-run.`;
 
             } else if (agentKey === "five_why") {
               let ps = "", ef = "", eq = "", lo = "", oc = "", ts = "", ws = "";
@@ -1937,15 +2147,15 @@ BEGIN WITH STEP 1 NOW.`;
               prompt += `\nUsing the preceding findings, perform your analysis for ${agent.name}.\n`;
 
               if (agentKey === "fault_tree") {
-                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"tree":{"id":"top-event","label":"Primary failure event","type":"gate","gateType":"OR","probability":1.0,"children":[{"id":"sub-1","label":"Sub-event","type":"gate","gateType":"AND","probability":0.3,"children":[{"id":"leaf-1","label":"Root cause","type":"event","probability":0.1}]}]}}`;
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object. Use ACTUAL causes from the analysis above — every label must be incident-specific. Top-event probability=1.0. Generate at least 3 child branches with at least 2 leaf events each:\n{"tree":{"id":"top-event","label":"[Specific primary failure event for this incident]","type":"gate","gateType":"OR","probability":1.0,"children":[{"id":"sub-1","label":"[Specific contributing cause from Fishbone/5-Why]","type":"gate","gateType":"AND","probability":0.65,"children":[{"id":"leaf-1","label":"[Specific root cause]","type":"event","probability":0.45},{"id":"leaf-2","label":"[Second specific root cause]","type":"event","probability":0.3}]},{"id":"sub-2","label":"[Second contributing cause]","type":"gate","gateType":"OR","probability":0.4,"children":[{"id":"leaf-3","label":"[Root cause leaf]","type":"event","probability":0.2}]}]}}`;
               } else if (agentKey === "pareto") {
-                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"paretoAnalysis":{"byFailureMode":[{"mode":"Failure Mode A","frequency":12},{"mode":"Failure Mode B","frequency":4}]}}`;
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object. List ALL actual failure modes from the analysis with NON-ZERO frequency weights (1–20) based on evidence strength. Include at least 5 modes:\n{"paretoAnalysis":{"byFailureMode":[{"mode":"[Specific failure mode 1 from this incident]","frequency":12},{"mode":"[Failure mode 2]","frequency":8},{"mode":"[Failure mode 3]","frequency":5},{"mode":"[Failure mode 4]","frequency":3},{"mode":"[Failure mode 5]","frequency":2}]}}`;
               } else if (agentKey === "timeline") {
-                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"timeline":{"phases":[{"phase":"Pre-Incident","start":"T-60m","duration":"55m","description":"Steady state","events":["08:00: Nominal"]},{"phase":"Trigger","start":"T-5m","duration":"5m","description":"Failure onset","events":["08:55: Failure"]}]}}`;
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object. Reconstruct the actual incident chronology using all known timestamps and symptoms. Generate at least 4 phases with at least 2 specific events each:\n{"timeline":{"phases":[{"phase":"Pre-Incident Operations","start":"T-60m","duration":"55m","description":"Normal conditions","events":["[Specific T-60m event from incident context]","[Specific T-30m observation]"]},{"phase":"Trigger Event","start":"T-5m","duration":"5m","description":"Failure onset","events":["[First symptom from witnessed symptoms]","[Failure event at T-0m]"]},{"phase":"Incident Response","start":"T+0m","duration":"30m","description":"Immediate response","events":["[Operator response]","[Shutdown action]"]},{"phase":"Recovery","start":"T+30m","duration":"60m","description":"Recovery and investigation","events":["[Recovery step 1]","[Investigation initiated]"]}]}}`;
               } else if (agentKey === "equipment") {
-                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"reliabilityMetrics":{"rpnScores":{"probe":30,"valve":85,"controller":40}}}`;
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object. Derive all values from the incident context above — no placeholders:\n{"reliabilityMetrics":{"mtbf":{"value":"720 hrs","trend":"Decreasing"},"mttr":{"value":"4.5 hrs","trend":"Stable"},"availability":{"value":"99.2%","trend":"Below target"},"failureRate":{"value":"0.0014/hr","trend":"Increasing"},"rpnScores":{"probe":30,"valve":85,"controller":40}}}`;
               } else if (agentKey === "report") {
-                prompt += `IMPORTANT: Respond ONLY with a single JSON object:\n{"rootCause":"Confirmed root cause statement","correctiveActionsList":[{"id":"capa-1","desc":"Corrective action","owner":"Ops Team","date":"2026-06-01","status":"Pending"}],"checklist":{"rootCauseMapped":true,"capaFeasible":true,"redundancyMet":true}}`;
+                prompt += `IMPORTANT: Respond ONLY with a single JSON object. Synthesise ALL preceding agent findings into a comprehensive RCA report matching this schema exactly:\n{"rcaReport":{"header":{"rcaNumber":"HZL/<PLANT>/<EQUIP>/<Mon-YY>","plant":"<plant>","initiationDate":"<YYYY-MM-DD>","submissionDate":"<YYYY-MM-DD>","department":"<dept>","section":"<section>","z2NotificationNumber":"","zrNumber":""},"equipment":{"number":"<tag>","name":"<name>","occurrenceDateTime":"<datetime>","restorationDateTime":"<datetime>","productionAffectedHours":"<hrs>","affectsProduction":"Yes"},"problemDescription":"<clear description>","immediateActions":[{"action":"<action>","who":"<who>","when":"<when>"}],"costOfFailure":{"sparePartCost":0,"serviceCost":0,"manpowerCost":0,"productionLoss":0},"chronologyEvents":[{"srNo":1,"event":"<event>","date":"<YYYY-MM-DD>","time":"<HH:MM>"}],"teamMembers":[{"no":1,"name":"<name>","department":"<dept>","type":"BP"}],"maintenanceHistory":{"lastPMDate":"<date>","lastPMObservations":"<obs>","cbmDate":"<date>","cbmStatus":"Normal","rootCauseIdentifiableByCBM":"No"},"lastFailure":{"date":"<date>","detail":"<detail>","rootCause":"<cause>"},"fmeaExists":"NA","currentFailureInFMEA":"NA","whyWhyAnalysis":{"problem":"<problem>","stream1":{"why1":"","why2":"","why3":"","why4":"","why5":""},"stream2":{"why1":"","why2":"","why3":"","why4":"","why5":""}},"rootCauses":["<primary RC>","","",""],"fishboneCategories":{"manpower":[],"machine":[],"method":[],"material":[],"measurement":[],"environment":[]},"rootCauseCloseout":{"selectedCategories":["machine"]},"actionPlan":[{"srNo":1,"action":"<CA>","type":"CA","classification":"NA","responsible":"<person>","department":"<dept>","target":"<YYYY-MM-DD>","status":"Pending"},{"srNo":2,"action":"<PA>","type":"PA","classification":"NA","responsible":"<person>","department":"<dept>","target":"<YYYY-MM-DD>","status":"In Progress"}],"horizontalDeployment":"<scope>","preventiveMeasures":"<measures>","sustainableMeasures":"<SOP updates>","externalInvestigationRequired":"No","externalTestingRequired":"No","changesRequiredInODC":"No","changesRequiredInFMEA":"No"},"rootCause":"<same as rootCauses[0]>","correctiveActionsList":[{"id":"capa-1","desc":"<action>","owner":"<owner>","date":"<YYYY-MM-DD>","status":"Pending"}],"checklist":{"rootCauseMapped":true,"capaFeasible":true,"redundancyMet":true}}`;
               }
             }
 
@@ -1963,6 +2173,11 @@ BEGIN WITH STEP 1 NOW.`;
             emit({ type: "agent_progress", agent: agentKey, step: 1, message: "Calling agent API…" });
 
             let responseText = await callAgentApiRaw(agentKey as AgentKey, prompt, chatId);
+            // Strip leading prose for structured agents (handles "Synthesizing…" preamble)
+            if (STRUCTURED_AGENTS_FA.includes(agentKey)) {
+              const jsonStart = responseText.indexOf("{");
+              if (jsonStart > 0) responseText = responseText.slice(jsonStart);
+            }
             let parsed: any = null;
             try {
               parsed = JSON.parse(responseText);
@@ -2152,3 +2367,317 @@ BEGIN WITH STEP 1 NOW.`;
     });
   });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RCA Report File Download
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const downloadRcaReport = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        caseId: z.string(),
+        format: z.enum(["xlsx", "docx"]),
+      })
+      .parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context as { userId: string };
+    const db = getDb();
+
+    // Load the latest assistant message from the report conversation
+    const convo = db
+      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?")
+      .get(data.caseId, userId) as { id: string } | undefined;
+
+    if (!convo) throw new Error("No report conversation found for this case.");
+
+    const lastMsg = db
+      .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
+      .get(convo.id) as { content: string; raw_response: string } | undefined;
+
+    if (!lastMsg) throw new Error("No report content found. Run the report agent first.");
+
+    // Parse the report JSON — try content, then raw_response
+    let reportJson: any = null;
+    for (const src of [lastMsg.content, lastMsg.raw_response]) {
+      if (!src) continue;
+      try {
+        const p = JSON.parse(src);
+        reportJson = p.rcaReport ? p : (p.rcaReport ? p.rcaReport : p);
+        if (reportJson) break;
+      } catch {}
+    }
+
+    if (!reportJson) throw new Error("Could not parse report JSON from agent response.");
+
+    // Normalise: unwrap rcaReport if nested
+    const rawReport = reportJson.rcaReport || reportJson;
+
+    // Load case metadata to fill any missing fields
+    const rcaCase = db
+      .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
+      .get(data.caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+
+    let incidentMeta: any = {};
+    if (rcaCase?.incident_data) {
+      try { incidentMeta = JSON.parse(rcaCase.incident_data); } catch {}
+    }
+
+    // Build a well-formed RcaReportData object with sensible fallbacks
+    const report = {
+      header: {
+        rcaNumber: rawReport.header?.rcaNumber || `RCA/${Date.now()}`,
+        plant: rawReport.header?.plant || incidentMeta.location || "—",
+        initiationDate: rawReport.header?.initiationDate || new Date().toISOString().split("T")[0],
+        submissionDate: rawReport.header?.submissionDate || new Date().toISOString().split("T")[0],
+        department: rawReport.header?.department || incidentMeta.department || "—",
+        section: rawReport.header?.section || "—",
+        z2NotificationNumber: rawReport.header?.z2NotificationNumber || "",
+        zrNumber: rawReport.header?.zrNumber || "",
+      },
+      equipment: {
+        number: rawReport.equipment?.number || rcaCase?.asset_id || "—",
+        name: rawReport.equipment?.name || incidentMeta.equipmentName || rcaCase?.title || "—",
+        occurrenceDateTime: rawReport.equipment?.occurrenceDateTime || incidentMeta.timestamp || "—",
+        restorationDateTime: rawReport.equipment?.restorationDateTime || "—",
+        productionAffectedHours: rawReport.equipment?.productionAffectedHours || "—",
+        affectsProduction: rawReport.equipment?.affectsProduction || "Yes",
+      },
+      problemDescription: rawReport.problemDescription || reportJson.rootCause || incidentMeta.problemStatement || "—",
+      immediateActions: Array.isArray(rawReport.immediateActions) ? rawReport.immediateActions : [],
+      costOfFailure: {
+        sparePartCost: rawReport.costOfFailure?.sparePartCost ?? 0,
+        serviceCost: rawReport.costOfFailure?.serviceCost ?? 0,
+        manpowerCost: rawReport.costOfFailure?.manpowerCost ?? 0,
+        productionLoss: rawReport.costOfFailure?.productionLoss ?? 0,
+      },
+      chronologyEvents: Array.isArray(rawReport.chronologyEvents) ? rawReport.chronologyEvents : [],
+      teamMembers: Array.isArray(rawReport.teamMembers) ? rawReport.teamMembers : [],
+      maintenanceHistory: {
+        lastPMDate: rawReport.maintenanceHistory?.lastPMDate || "—",
+        lastPMObservations: rawReport.maintenanceHistory?.lastPMObservations || "—",
+        cbmDate: rawReport.maintenanceHistory?.cbmDate || "—",
+        cbmStatus: rawReport.maintenanceHistory?.cbmStatus || "—",
+        rootCauseIdentifiableByCBM: rawReport.maintenanceHistory?.rootCauseIdentifiableByCBM || "—",
+      },
+      lastFailure: {
+        date: rawReport.lastFailure?.date || "—",
+        detail: rawReport.lastFailure?.detail || "—",
+        rootCause: rawReport.lastFailure?.rootCause || "—",
+      },
+      fmeaExists: rawReport.fmeaExists || "NA",
+      currentFailureInFMEA: rawReport.currentFailureInFMEA || "NA",
+      whyWhyAnalysis: rawReport.whyWhyAnalysis || {
+        problem: incidentMeta.problemStatement || "—",
+        stream1: {},
+        stream2: {},
+      },
+      rootCauses: Array.isArray(rawReport.rootCauses) ? rawReport.rootCauses : [reportJson.rootCause || "—"],
+      fishboneCategories: rawReport.fishboneCategories || {},
+      rootCauseCloseout: rawReport.rootCauseCloseout || { selectedCategories: [] },
+      actionPlan: Array.isArray(rawReport.actionPlan)
+        ? rawReport.actionPlan
+        : (Array.isArray(reportJson.correctiveActionsList)
+            ? reportJson.correctiveActionsList.map((a: any, idx: number) => ({
+                srNo: idx + 1,
+                action: a.desc || a.description || String(a),
+                type: "CA",
+                classification: "NA",
+                responsible: a.owner || "—",
+                department: "—",
+                target: a.date || "—",
+                status: a.status || "Pending",
+              }))
+            : []),
+      horizontalDeployment: rawReport.horizontalDeployment || "—",
+      preventiveMeasures: rawReport.preventiveMeasures || "—",
+      sustainableMeasures: rawReport.sustainableMeasures || "—",
+      externalInvestigationRequired: rawReport.externalInvestigationRequired || "No",
+      externalTestingRequired: rawReport.externalTestingRequired || "No",
+      changesRequiredInODC: rawReport.changesRequiredInODC || "No",
+      changesRequiredInFMEA: rawReport.changesRequiredInFMEA || "No",
+      rootCause: reportJson.rootCause,
+      correctiveActionsList: reportJson.correctiveActionsList,
+    };
+
+    const { generateRcaXlsx, generateRcaDocx } = await import("./rca.report");
+
+    if (data.format === "xlsx") {
+      const buf = await generateRcaXlsx(report as any);
+      // Write to temp file and return as base64 for client download
+      const tmpPath = path.join("/tmp", `rca-report-${data.caseId}-${Date.now()}.xlsx`);
+      fs.writeFileSync(tmpPath, buf);
+      const b64 = buf.toString("base64");
+      return { base64: b64, mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename: `RCA-Report-${rcaCase?.asset_id || data.caseId}.xlsx` };
+    } else {
+      const buf = await generateRcaDocx(report as any);
+      const b64 = buf.toString("base64");
+      return { base64: b64, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename: `RCA-Report-${rcaCase?.asset_id || data.caseId}.docx` };
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full Pipeline Export (all 8 steps → HTML or DOCX)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const exportFullAnalysis = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z.object({ caseId: z.string(), format: z.enum(["html", "docx"]) }).parse(input)
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context as { userId: string };
+    const db = getDb();
+
+    const rcaCase = db
+      .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
+      .get(data.caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+
+    /** Fetch last assistant message JSON from an agent's conversation */
+    const getAgentData = (agentKey: string): any => {
+      const convo = db
+        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
+        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      if (!convo) return null;
+      const msg = db
+        .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
+        .get(convo.id) as { content: string; raw_response: string } | undefined;
+      if (!msg) return null;
+      for (const src of [msg.content, msg.raw_response]) {
+        if (!src) continue;
+        try { return JSON.parse(src); } catch {}
+      }
+      return { text: msg.content };
+    };
+
+    /** Fetch ALL assistant messages from a conversation (for multi-turn agents) */
+    const getAllMessages = (agentKey: string): Array<{ role: string; content: string; parsed: any }> => {
+      const convo = db
+        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
+        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      if (!convo) return [];
+      const msgs = db
+        .prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
+        .all(convo.id) as Array<{ role: string; content: string }>;
+      return msgs.map((m) => {
+        let parsed: any = null;
+        try { parsed = JSON.parse(m.content); } catch {}
+        return { ...m, parsed };
+      });
+    };
+
+    const collectorData = getAgentData("data_collector") || {};
+    // Supplement collector with incident_data fields
+    if (rcaCase.incident_data) {
+      try {
+        const inc = JSON.parse(rcaCase.incident_data);
+        for (const key of ["problemStatement", "effect", "equipmentName", "location", "operatingConditions", "timestamp", "witnessedSymptoms", "gaps", "followUps"]) {
+          if (!collectorData[key] && inc[key]) collectorData[key] = inc[key];
+        }
+      } catch {}
+    }
+
+    const allData = {
+      caseTitle: rcaCase.title,
+      assetId: rcaCase.asset_id,
+      generatedAt: new Date().toLocaleString("en-IN", { dateStyle: "long", timeStyle: "short" }),
+      collector: collectorData,
+      fiveWhy: { messages: getAllMessages("five_why") },
+      fishbone: getAgentData("fishbone") || {},
+      faultTree: getAgentData("fault_tree") || {},
+      pareto: getAgentData("pareto") || {},
+      timeline: getAgentData("timeline") || {},
+      equipment: getAgentData("equipment") || {},
+      report: getAgentData("report") || {},
+    };
+
+    const { generateFullAnalysisHtml, generateFullAnalysisDocx } = await import("./rca.export");
+
+    if (data.format === "html") {
+      const html = generateFullAnalysisHtml(allData as any);
+      const b64 = Buffer.from(html, "utf-8").toString("base64");
+      return { base64: b64, mimeType: "text/html", filename: `RCA-Full-Analysis-${rcaCase.asset_id || data.caseId}.html` };
+    } else {
+      const buf = await generateFullAnalysisDocx(allData as any);
+      const b64 = buf.toString("base64");
+      return { base64: b64, mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename: `RCA-Full-Analysis-${rcaCase.asset_id || data.caseId}.docx` };
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Get combined data from all agents for the report step
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const getCombinedAnalysis = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId } = context as { userId: string };
+    const db = getDb();
+
+    const rcaCase = db
+      .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
+      .get(data.caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+
+    if (!rcaCase) throw new Error("Case not found");
+
+    const getAgentLastMsg = (agentKey: string): any => {
+      const convo = db
+        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
+        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      if (!convo) return null;
+      const msg = db
+        .prepare(
+          "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(convo.id) as { content: string; raw_response: string } | undefined;
+      if (!msg) return null;
+      for (const src of [msg.content, msg.raw_response]) {
+        if (!src) continue;
+        try { return JSON.parse(src); } catch {}
+      }
+      return { text: msg.content };
+    };
+
+    const getAllMsgs = (agentKey: string) => {
+      const convo = db
+        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
+        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      if (!convo) return [];
+      const msgs = db
+        .prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
+        .all(convo.id) as Array<{ role: string; content: string }>;
+      return msgs.map((m) => {
+        let parsed: any = null;
+        try { parsed = JSON.parse(m.content); } catch {}
+        return { role: m.role, content: m.content, parsed };
+      });
+    };
+
+    const collector = getAgentLastMsg("data_collector") || {};
+    // Fill missing collector fields from incident_data
+    if (rcaCase.incident_data) {
+      try {
+        const inc = JSON.parse(rcaCase.incident_data);
+        for (const k of ["problemStatement","effect","equipmentName","location","operatingConditions","timestamp","witnessedSymptoms","gaps","followUps"]) {
+          if (!collector[k] && inc[k]) collector[k] = inc[k];
+        }
+      } catch {}
+    }
+
+    return {
+      caseTitle: rcaCase.title,
+      assetId: rcaCase.asset_id || "",
+      collector,
+      fiveWhyMessages: getAllMsgs("five_why"),
+      fishbone: getAgentLastMsg("fishbone") || {},
+      faultTree: getAgentLastMsg("fault_tree") || {},
+      pareto: getAgentLastMsg("pareto") || {},
+      timeline: getAgentLastMsg("timeline") || {},
+      equipment: getAgentLastMsg("equipment") || {},
+      report: getAgentLastMsg("report") || {},
+    };
+  });

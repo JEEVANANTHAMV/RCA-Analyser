@@ -1,0 +1,304 @@
+{
+    "timeline": {
+        "phases": [
+            {
+                "phase": "Systemic Latency (Pre-Installation)",
+                "start": "T-90d (Estimated)",
+                "duration": "90 days",
+                "description": "Period where root causes accumulated: Lack of MOC process allowed outdated procedures to persist, and missing torque/tension verification standards were not enforced.",
+                "events": [
+                    "T-90d: Maintenance procedures for mechanical splices remained outdated, lacking OEM torque and tension verification checklists (5-Why Root Cause: No MOC process).",
+                    "T-14d: Mechanical splice installation performed on Conveyor CV-03 without documented torque verification or tension monitoring (Fishbone Measurements: Missing records; Fault Tree BE-01/BE-02)."
+                ]
+            },
+            {
+                "phase": "Progressive Degradation (Post-Installation)",
+                "start": "T-30d",
+                "duration": "30 days",
+                "description": "Period following installation where misalignment and environmental factors stressed the weak splice, leading to progressive degradation.",
+                "events": [
+                    "T-30d: Pulley/Frame misalignment and sticky material buildup began exerting lateral forces on the belt, exacerbating stress on the improperly installed splice (Fishbone Machine/Environment: BE-04/BE-05).",
+                    "T-1d: Increased throughput in May placed higher dynamic loads on the conveyor, accelerating fatigue in the splice area lacking proper tension verification (Data Collector Follow-up: Impact of increased throughput)."
+                ]
+            },
+            {
+                "phase": "Trigger Event (Failure Onset)",
+                "start": "T-5m (04-Jun-2026)",
+                "duration": "5 minutes",
+                "description": "The immediate sequence leading to the mechanical failure and trip.",
+                "events": [
+                    "T-5m: Belt tracking deviation exceeded safe limits due to combined misalignment and splice weakness, causing visible belt wander (Problem Statement: Belt misalignment trip).",
+                    "T-0m: Longitudinal mechanical splice failure occurred, resulting in immediate loss of belt integrity and activation of the misalignment safety trip (Problem Statement: Splice failure and trip)."
+                ]
+            },
+            {
+                "phase": "Incident & Response (Shutdown)",
+                "start": "T+0m (04-Jun-2026)",
+                "duration": "7.5 hours",
+                "description": "Immediate post-failure response, isolation, and initial assessment.",
+                "events": [
+                    "T+0m: Conveyor CV-03 automatically shutdown via trip, halting primary crushing circuit operations and preventing further material spill (Effect: Immediate shutdown).",
+                    "T+7.5h: Maintenance team completes initial isolation and inspection, confirming splice failure and initiating RCA process (Effect: 7.5 hours downtime)."
+                ]
+            }
+        ]
+    }
+}{
+    "timelineAndEventCorrelation": {
+        "incidentId": "INC-CV03-2026-0604",
+        "analysisDate": "2026-06-05",
+        "analyst": "RCA Timeline & Event Correlation Agent",
+        "incidentOverview": {
+            "incidentDate": "2026-06-04",
+            "incidentStartTime": "Unknown (Trip Event)",
+            "incidentEndTime": "2026-06-04 +7.5h",
+            "totalDuration": "7.5 hours downtime",
+            "equipment": "Conveyor CV-03",
+            "location": "Primary Crushing Circuit",
+            "shift": "Maintenance/Operations Shift (Context from Installation)",
+            "operatorOnDuty": "Maintenance Technician (Splice Install) / Operations Staff (Trip)",
+            "severity": "Major - Production loss of 6,750 tons, $84,000 financial impact"
+        },
+        "timeline": {
+            "preIncidentPeriod": {
+                "start": "T-90d (Estimated)",
+                "end": "2026-06-04 00:00:00",
+                "description": "Systemic degradation period characterized by lack of Management of Change (MOC) and improper installation practices.",
+                "events": [
+                    {
+                        "timestamp": "T-90d (Estimated)",
+                        "event": "Maintenance procedures for mechanical splices identified as outdated; OEM torque/tension guidelines not integrated.",
+                        "source": "5-Why Analysis / Fishbone (Methods)",
+                        "category": "system",
+                        "significance": "critical",
+                        "notes": "Root cause: No formal MOC process to trigger updates after previous incidents or design changes."
+                    },
+                    {
+                        "timestamp": "T-14d (Estimated)",
+                        "event": "Mechanical splice installed on Conveyor CV-03 without torque verification records or tension monitoring.",
+                        "source": "Data Collector Gaps / Fault Tree (BE-01, BE-02)",
+                        "category": "maintenance",
+                        "significance": "critical",
+                        "isFirstDeviation": true,
+                        "notes": "Installation performed by technicians lacking specific OEM certification (Fishbone Manpower). No quantitative tension data recorded."
+                    },
+                    {
+                        "timestamp": "T-30d to T-1d",
+                        "event": "Progressive stress accumulation due to pulley/frame misalignment and sticky material buildup.",
+                        "source": "Fishbone (Machine/Environment) / Fault Tree (BE-04, BE-05)",
+                        "category": "equipment",
+                        "significance": "high",
+                        "notes": "Structural misalignment and environmental debris exerted lateral forces on the weak splice, accelerating fatigue."
+                    },
+                    {
+                        "timestamp": "May 2026",
+                        "event": "Increased throughput targets placed higher dynamic loads on conveyor system.",
+                        "source": "Data Collector Follow-ups",
+                        "category": "process",
+                        "significance": "medium",
+                        "notes": "Higher loads exacerbated the weakness in the improperly installed splice."
+                    }
+                ]
+            },
+            "incidentPeriod": {
+                "start": "2026-06-04 T-5m",
+                "end": "2026-06-04 T+0m",
+                "description": "The immediate sequence of mechanical failure and protective trip.",
+                "events": [
+                    {
+                        "timestamp": "2026-06-04 T-5m",
+                        "event": "Belt tracking deviation exceeded safe limits, causing visible belt wander.",
+                        "source": "Problem Statement / Witnessed Symptoms",
+                        "category": "process",
+                        "significance": "high",
+                        "notes": "Misalignment trip condition initiated. Likely audible/visual warning before full failure."
+                    },
+                    {
+                        "timestamp": "2026-06-04 T-0m",
+                        "event": "Longitudinal mechanical splice failure occurred.",
+                        "source": "Problem Statement",
+                        "category": "equipment",
+                        "significance": "critical",
+                        "notes": "Catastrophic loss of belt integrity at the splice joint."
+                    },
+                    {
+                        "timestamp": "2026-06-04 T+0m",
+                        "event": "Conveyor CV-03 automatic shutdown via misalignment safety trip.",
+                        "source": "Problem Statement / Effect",
+                        "category": "equipment",
+                        "isTripEvent": true,
+                        "significance": "critical",
+                        "notes": "Emergency stop executed to prevent further damage and material spill."
+                    }
+                ]
+            },
+            "postIncidentPeriod": {
+                "start": "2026-06-04 T+0m",
+                "end": "2026-06-04 T+7.5h",
+                "description": "Post-trip response, isolation, and initial assessment.",
+                "events": [
+                    {
+                        "timestamp": "2026-06-04 T+0m",
+                        "event": "Primary crushing circuit operations halted; production loss begins.",
+                        "source": "Effect Data",
+                        "category": "process",
+                        "significance": "high",
+                        "notes": "6,750 tons production loss estimated."
+                    },
+                    {
+                        "timestamp": "2026-06-04 T+1h",
+                        "event": "Maintenance team isolates conveyor and begins initial inspection.",
+                        "source": "Standard Operating Procedure (Inferred)",
+                        "category": "human",
+                        "significance": "normal",
+                        "notes": "Confirmation of splice failure and assessment of belt damage."
+                    },
+                    {
+                        "timestamp": "2026-06-04 T+7.5h",
+                        "event": "Initial RCA data collection initiated; downtime totals 7.5 hours.",
+                        "source": "Effect Data / Data Collector",
+                        "category": "management",
+                        "significance": "normal",
+                        "notes": "Financial impact calculated at $84,000. RCA pipeline triggered."
+                    }
+                ]
+            }
+        },
+        "eventCorrelation": {
+            "causalChain": [
+                {
+                    "step": 1,
+                    "cause": "Absence of Management of Change (MOC) process",
+                    "effect": "Maintenance procedures remained outdated, excluding OEM torque/tension specs",
+                    "timeSpan": "Long-term (Systemic)",
+                    "confidence": 99
+                },
+                {
+                    "step": 2,
+                    "cause": "Outdated procedures + Lack of technician training",
+                    "effect": "Splice installed without torque verification or tension monitoring",
+                    "timeSpan": "T-14d (Installation Event)",
+                    "confidence": 95
+                },
+                {
+                    "step": 3,
+                    "cause": "Weak splice integrity + Pulley/Frame misalignment + Sticky buildup",
+                    "effect": "Progressive stress and fatigue on splice joint under increased load",
+                    "timeSpan": "T-14d to T-5m",
+                    "confidence": 90
+                },
+                {
+                    "step": 4,
+                    "cause": "Belt tracking deviation exceeds limits",
+                    "effect": "Activation of misalignment trip and subsequent splice failure",
+                    "timeSpan": "T-5m to T-0m",
+                    "confidence": 98
+                }
+            ],
+            "simultaneousEvents": [
+                {
+                    "timeWindow": "T-5m to T-0m",
+                    "events": [
+                        "Belt tracking deviation",
+                        "Splice longitudinal shear failure",
+                        "Safety trip activation"
+                    ],
+                    "correlation": "Rapid cascade: Misalignment stress caused splice failure, which triggered the safety trip."
+                }
+            ],
+            "responseTimeAnalysis": {
+                "detectionTime": "Immediate (Safety Trip)",
+                "acknowledgmentTime": "Unknown (Assumed < 5 mins)",
+                "interventionTime": "N/A (Automatic Shutdown)",
+                "escalationTime": "Unknown",
+                "totalResponseTime": "7.5 hours to restore operations",
+                "assessment": "Safety systems functioned correctly by tripping the conveyor. Downtime duration reflects repair complexity due to lack of spare parts/pre-planning for splice failure."
+            }
+        },
+        "deviationTimeline": {
+            "firstDeviation": {
+                "parameter": "Procedure Currency (MOC)",
+                "timestamp": "T-90d (Estimated)",
+                "value": "Outdated",
+                "limit": "Current/OEM-Aligned",
+                "deviation": "Systemic Gap"
+            },
+            "earliestWarningSign": {
+                "parameter": "Splice Installation Quality",
+                "timestamp": "T-14d (Estimated)",
+                "description": "Installation performed without torque/tension records.",
+                "missedOpportunity": "No hold point or supervisor verification required due to lack of procedure."
+            },
+            "deviationProgression": [
+                {
+                    "time": "T-14d",
+                    "parameter": "Splice Integrity",
+                    "status": "Compromised (Unverified)",
+                    "notes": "No torque/tension data available."
+                },
+                {
+                    "time": "T-30d to T-1d",
+                    "parameter": "Belt Alignment",
+                    "status": "Degrading",
+                    "notes": "Misalignment and sticky buildup increasing lateral stress."
+                },
+                {
+                    "time": "T-5m",
+                    "parameter": "Tracking Deviation",
+                    "status": "Critical",
+                    "notes": "Exceeded safe limits, triggering trip."
+                },
+                {
+                    "time": "T-0m",
+                    "parameter": "Splice Status",
+                    "status": "Failed",
+                    "notes": "Longitudinal shear."
+                }
+            ]
+        },
+        "timelineGaps": [
+            {
+                "gapPeriod": "T-90d to T-14d",
+                "description": "Exact date of last procedure update or incident triggering need for update is unknown.",
+                "impact": "Cannot determine duration of systemic exposure.",
+                "recommendation": "Audit document control history for CV-03 procedures."
+            },
+            {
+                "gapPeriod": "T-14d (Installation)",
+                "description": "No torque or tension records exist for the failed splice.",
+                "impact": "Cannot quantify installation error magnitude.",
+                "recommendation": "Mandate digital logging of torque/tension for future splices."
+            },
+            {
+                "gapPeriod": "T-30d to T-5m",
+                "description": "No historical alignment survey data or tracking sensor trends.",
+                "impact": "Cannot pinpoint onset of misalignment.",
+                "recommendation": "Install continuous belt tracking monitoring."
+            }
+        ],
+        "suggestions": {
+            "immediateActions": [
+                "Implement formal Management of Change (MOC) process for all maintenance procedures.",
+                "Update CV-03 splice installation procedure to include mandatory OEM torque and tension verification checklists.",
+                "Perform laser alignment survey of CV-03 pulleys and frame to correct misalignment."
+            ],
+            "shortTermActions": [
+                "Retrain maintenance technicians on updated splice installation procedures and documentation requirements.",
+                "Procure and calibrate digital torque wrenches and belt tension meters.",
+                "Audit all recent mechanical splice installations on site for missing records."
+            ],
+            "longTermActions": [
+                "Integrate mandatory digital logging (photos/data) of torque and tension into the CMMS for all critical splices.",
+                "Install permanent automated belt tracking and tension monitoring systems on critical conveyors.",
+                "Conduct full FMEA/PHA review for all conveyor systems to identify other critical control points lacking verification."
+            ]
+        },
+        "standardsReferenced": [
+            "IS/ISO 9001:2015 Clause 8.5.1 - Control of production and service provision",
+            "IS/ISO 9001:2015 Clause 10.2 - Nonconformity and corrective action",
+            "ASTM E2659-16 - Standard Guide for Root Cause Analysis",
+            "CEMA Belt Conveyors for Bulk Materials - Splicing Guidelines",
+            "IEC 61508 - Functional safety of electrical/electronic/programmable electronic safety-related systems"
+        ]
+    }
+}

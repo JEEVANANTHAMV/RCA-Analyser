@@ -1,0 +1,539 @@
+{
+    "faultTreeAnalysis": {
+        "incidentId": "CV-03-SpliceFail-20260604",
+        "topEvent": {
+            "id": "TE-01",
+            "description": "Conveyor CV-03 longitudinal mechanical splice failure and belt misalignment trip",
+            "date": "2026-06-04"
+        },
+        "tree": {
+            "eventId": "TE-01",
+            "description": "Conveyor CV-03 longitudinal mechanical splice failure and belt misalignment trip",
+            "gate": "OR",
+            "children": [
+                {
+                    "eventId": "IE-01",
+                    "description": "Insufficient Splice Integrity due to Installation Defects",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-01",
+                            "description": "Missing torque verification records for splice clips",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.95,
+                            "failureMode": "Documentation/Process Failure",
+                            "detectionMethod": "Work Order Audit",
+                            "evidenceFOR": "Data Collector gap: 'Original splice installation torque... records are missing'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-02",
+                            "description": "Lack of tension monitoring during splice installation",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.90,
+                            "failureMode": "Process Execution Failure",
+                            "detectionMethod": "Tool Crib/PM Log Review",
+                            "evidenceFOR": "Data Collector gap: 'Quantitative belt tension measurements... unavailable'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-03",
+                            "description": "Technicians inadequately trained on OEM splice procedures",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.85,
+                            "failureMode": "Human Resource Competency",
+                            "detectionMethod": "Training Records Review",
+                            "evidenceFOR": "Fishbone Manpower: 'Inadequate training... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                },
+                {
+                    "eventId": "IE-02",
+                    "description": "Belt Misalignment due to Mechanical/Environmental Factors",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-04",
+                            "description": "Pulley/Frame structural misalignment present",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.80,
+                            "failureMode": "Equipment Geometry Deviation",
+                            "detectionMethod": "Alignment Survey",
+                            "evidenceFOR": "Fishbone Machine: 'Pulley/Frame misalignment... confirmed'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-05",
+                            "description": "Sticky material buildup on pulleys/rollers",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.70,
+                            "failureMode": "Environmental Contamination",
+                            "detectionMethod": "Visual Inspection",
+                            "evidenceFOR": "Fishbone Environment: 'Debris on belt... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                },
+                {
+                    "eventId": "IE-03",
+                    "description": "Systemic Failure to Maintain Procedure Currency",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-06",
+                            "description": "No Management of Change (MOC) process for procedure updates",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.99,
+                            "failureMode": "Systemic Governance Failure",
+                            "detectionMethod": "Process Audit",
+                            "evidenceFOR": "5-Why Root Cause: 'No formal MOC process...'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-07",
+                            "description": "Maintenance procedures missing OEM guidelines/checklists",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.95,
+                            "failureMode": "Documentation Deficiency",
+                            "detectionMethod": "Document Control Review",
+                            "evidenceFOR": "Fishbone Methods: 'Outdated maintenance procedures... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                }
+            ]
+        },
+        "minimalCutSets": [
+            {
+                "cutSetId": "MCS-01",
+                "basicEvents": [
+                    "BE-01",
+                    "BE-02",
+                    "BE-03",
+                    "BE-04",
+                    "BE-05",
+                    "BE-06",
+                    "BE-07"
+                ],
+                "description": "Full systemic failure: Splice installed without torque/tension checks by untrained staff, on misaligned equipment with debris, governed by no MOC and outdated procedures.",
+                "order": 7,
+                "criticality": "critical",
+                "probability": 0.33
+            },
+            {
+                "cutSetId": "MCS-02",
+                "basicEvents": [
+                    "BE-01",
+                    "BE-02",
+                    "BE-03"
+                ],
+                "description": "Direct technical cause: Splice failure due to lack of torque verification, tension monitoring, and training.",
+                "order": 3,
+                "criticality": "high",
+                "probability": 0.73
+            },
+            {
+                "cutSetId": "MCS-03",
+                "basicEvents": [
+                    "BE-04",
+                    "BE-05"
+                ],
+                "description": "Contributing mechanical cause: Misalignment exacerbated by sticky material buildup.",
+                "order": 2,
+                "criticality": "medium",
+                "probability": 0.56
+            },
+            {
+                "cutSetId": "MCS-04",
+                "basicEvents": [
+                    "BE-06",
+                    "BE-07"
+                ],
+                "description": "Root systemic cause: Lack of MOC leading to outdated procedures.",
+                "order": 2,
+                "criticality": "high",
+                "probability": 0.94
+            }
+        ],
+        "structuralImportance": {
+            "mostCriticalBasicEvents": [
+                {
+                    "eventId": "BE-06",
+                    "description": "No Management of Change (MOC) process for procedure updates",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.99,
+                    "recommendation": "Implement formal MOC workflow for all maintenance procedure changes."
+                },
+                {
+                    "eventId": "BE-01",
+                    "description": "Missing torque verification records for splice clips",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.95,
+                    "recommendation": "Mandate torque sign-off sheets for all mechanical splices."
+                },
+                {
+                    "eventId": "BE-07",
+                    "description": "Maintenance procedures missing OEM guidelines/checklists",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.95,
+                    "recommendation": "Update CV-03 maintenance procedures to include OEM splice checklists."
+                },
+                {
+                    "eventId": "BE-02",
+                    "description": "Lack of tension monitoring during splice installation",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.90,
+                    "recommendation": "Require calibrated tension gauge usage and logging during installation."
+                },
+                {
+                    "eventId": "BE-03",
+                    "description": "Technicians inadequately trained on OEM splice procedures",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.85,
+                    "recommendation": "Certify maintenance staff on specific mechanical splice systems."
+                },
+                {
+                    "eventId": "BE-04",
+                    "description": "Pulley/Frame structural misalignment present",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.80,
+                    "recommendation": "Perform immediate alignment survey and correct deviations."
+                },
+                {
+                    "eventId": "BE-05",
+                    "description": "Sticky material buildup on pulleys/rollers",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.70,
+                    "recommendation": "Add pulley cleaning to daily inspection checklist."
+                }
+            ]
+        },
+        "quantitativeAnalysis": {
+            "topEventProbability": 1.0,
+            "dominantCutSet": "MCS-01",
+            "sensitivityAnalysis": [
+                {
+                    "basicEvent": "BE-06",
+                    "currentProbability": 0.99,
+                    "ifReducedTo": 0.01,
+                    "topEventProbabilityBecomes": 0.01,
+                    "reduction": "99.0%"
+                },
+                {
+                    "basicEvent": "BE-01",
+                    "currentProbability": 0.95,
+                    "ifReducedTo": 0.05,
+                    "topEventProbabilityBecomes": 0.05,
+                    "reduction": "94.7%"
+                },
+                {
+                    "basicEvent": "BE-04",
+                    "currentProbability": 0.80,
+                    "ifReducedTo": 0.01,
+                    "topEventProbabilityBecomes": 0.01,
+                    "reduction": "98.8%"
+                }
+            ]
+        },
+        "suggestions": {
+            "designChanges": [
+                "Install automated belt tension monitoring system on CV-03.",
+                "Upgrade splice design to vulcanized joint if mechanical splice reliability remains insufficient."
+            ],
+            "proceduralChanges": [
+                "Implement formal Management of Change (MOC) process for all maintenance procedures.",
+                "Update CV-03 Splice Installation Procedure to include mandatory torque and tension verification checklists.",
+                "Require OEM certification for technicians performing mechanical splices."
+            ],
+            "monitoringEnhancements": [
+                "Add pulley alignment checks to quarterly Preventive Maintenance (PM) schedule.",
+                "Include sticky material buildup inspection in daily operator rounds.",
+                "Audit work orders for splice installations to ensure torque records are attached."
+            ]
+        },
+        "standardsReferenced": [
+            "IEC 61025",
+            "IS/IEC 61508",
+            "MIL-STD-1629A",
+            "NASA-STD-3000",
+            "IS/ISO 31010"
+        ]
+    }
+}{
+    "faultTreeAnalysis": {
+        "incidentId": "CV-03-SpliceFail-20260604",
+        "topEvent": {
+            "id": "TE-01",
+            "description": "Conveyor CV-03 longitudinal mechanical splice failure and belt misalignment trip",
+            "date": "2026-06-04"
+        },
+        "tree": {
+            "eventId": "TE-01",
+            "description": "Conveyor CV-03 longitudinal mechanical splice failure and belt misalignment trip",
+            "gate": "OR",
+            "children": [
+                {
+                    "eventId": "IE-01",
+                    "description": "Splice Joint Failure due to Installation Defects",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-01",
+                            "description": "Missing torque verification for splice clips (no records)",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.95,
+                            "failureMode": "Process Execution Failure",
+                            "detectionMethod": "Work Order Audit",
+                            "evidenceFOR": "Data Collector gap: 'Original splice installation torque... records are missing'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-02",
+                            "description": "Lack of tension monitoring during installation",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.90,
+                            "failureMode": "Process Execution Failure",
+                            "detectionMethod": "Tool Crib/PM Log Review",
+                            "evidenceFOR": "Data Collector gap: 'Quantitative belt tension measurements... unavailable'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-03",
+                            "description": "Technicians inadequately trained on OEM procedures",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.85,
+                            "failureMode": "Human Competency Gap",
+                            "detectionMethod": "Training Records Review",
+                            "evidenceFOR": "Fishbone Manpower: 'Inadequate training... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                },
+                {
+                    "eventId": "IE-02",
+                    "description": "Belt Misalignment due to Mechanical/Environmental Factors",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-04",
+                            "description": "Pulley/Frame structural misalignment present",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.80,
+                            "failureMode": "Equipment Geometry Deviation",
+                            "detectionMethod": "Alignment Survey",
+                            "evidenceFOR": "Fishbone Machine: 'Pulley/Frame misalignment... confirmed'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-05",
+                            "description": "Sticky material buildup on pulleys/rollers",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.70,
+                            "failureMode": "Environmental Contamination",
+                            "detectionMethod": "Visual Inspection",
+                            "evidenceFOR": "Fishbone Environment: 'Debris on belt... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                },
+                {
+                    "eventId": "IE-03",
+                    "description": "Systemic Governance Failure allowing defective state",
+                    "gate": "AND",
+                    "children": [
+                        {
+                            "eventId": "BE-06",
+                            "description": "No Management of Change (MOC) process for procedure updates",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.99,
+                            "failureMode": "Systemic Governance Failure",
+                            "detectionMethod": "Process Audit",
+                            "evidenceFOR": "5-Why Root Cause: 'No formal MOC process...'",
+                            "evidenceAGAINST": "None"
+                        },
+                        {
+                            "eventId": "BE-07",
+                            "description": "Maintenance procedures missing OEM guidelines/checklists",
+                            "gate": null,
+                            "children": [],
+                            "probability": 0.95,
+                            "failureMode": "Documentation Deficiency",
+                            "detectionMethod": "Document Control Review",
+                            "evidenceFOR": "Fishbone Methods: 'Outdated maintenance procedures... confirmed'",
+                            "evidenceAGAINST": "None"
+                        }
+                    ]
+                }
+            ]
+        },
+        "minimalCutSets": [
+            {
+                "cutSetId": "MCS-01",
+                "basicEvents": [
+                    "BE-01",
+                    "BE-02",
+                    "BE-03"
+                ],
+                "description": "Direct technical cause: Splice failure due to lack of torque verification, tension monitoring, and training.",
+                "order": 3,
+                "criticality": "critical",
+                "probability": 0.73
+            },
+            {
+                "cutSetId": "MCS-02",
+                "basicEvents": [
+                    "BE-04",
+                    "BE-05"
+                ],
+                "description": "Contributing mechanical cause: Misalignment exacerbated by sticky material buildup.",
+                "order": 2,
+                "criticality": "high",
+                "probability": 0.56
+            },
+            {
+                "cutSetId": "MCS-03",
+                "basicEvents": [
+                    "BE-06",
+                    "BE-07"
+                ],
+                "description": "Root systemic cause: Lack of MOC leading to outdated procedures.",
+                "order": 2,
+                "criticality": "high",
+                "probability": 0.94
+            },
+            {
+                "cutSetId": "MCS-04",
+                "basicEvents": [
+                    "BE-01",
+                    "BE-02",
+                    "BE-03",
+                    "BE-04",
+                    "BE-05",
+                    "BE-06",
+                    "BE-07"
+                ],
+                "description": "Full systemic failure scenario: All contributing factors present simultaneously.",
+                "order": 7,
+                "criticality": "critical",
+                "probability": 0.33
+            }
+        ],
+        "structuralImportance": {
+            "mostCriticalBasicEvents": [
+                {
+                    "eventId": "BE-06",
+                    "description": "No Management of Change (MOC) process for procedure updates",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.99,
+                    "recommendation": "Implement formal MOC workflow for all maintenance procedure changes immediately."
+                },
+                {
+                    "eventId": "BE-07",
+                    "description": "Maintenance procedures missing OEM guidelines/checklists",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.95,
+                    "recommendation": "Update CV-03 maintenance procedures to include OEM splice checklists and torque specs."
+                },
+                {
+                    "eventId": "BE-01",
+                    "description": "Missing torque verification for splice clips (no records)",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.95,
+                    "recommendation": "Mandate torque sign-off sheets and digital logging for all mechanical splices."
+                },
+                {
+                    "eventId": "BE-02",
+                    "description": "Lack of tension monitoring during installation",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.90,
+                    "recommendation": "Require calibrated tension gauge usage and logging during installation."
+                },
+                {
+                    "eventId": "BE-03",
+                    "description": "Technicians inadequately trained on OEM procedures",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.85,
+                    "recommendation": "Certify maintenance staff on specific mechanical splice systems."
+                },
+                {
+                    "eventId": "BE-04",
+                    "description": "Pulley/Frame structural misalignment present",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.80,
+                    "recommendation": "Perform immediate alignment survey and correct deviations."
+                },
+                {
+                    "eventId": "BE-05",
+                    "description": "Sticky material buildup on pulleys/rollers",
+                    "appearsInCutSets": 2,
+                    "structuralImportance": 0.70,
+                    "recommendation": "Add pulley cleaning to daily inspection checklist."
+                }
+            ]
+        },
+        "quantitativeAnalysis": {
+            "topEventProbability": 1.0,
+            "dominantCutSet": "MCS-01",
+            "sensitivityAnalysis": [
+                {
+                    "basicEvent": "BE-06",
+                    "currentProbability": 0.99,
+                    "ifReducedTo": 0.01,
+                    "topEventProbabilityBecomes": 0.01,
+                    "reduction": "99.0%"
+                },
+                {
+                    "basicEvent": "BE-01",
+                    "currentProbability": 0.95,
+                    "ifReducedTo": 0.05,
+                    "topEventProbabilityBecomes": 0.05,
+                    "reduction": "94.7%"
+                },
+                {
+                    "basicEvent": "BE-04",
+                    "currentProbability": 0.80,
+                    "ifReducedTo": 0.01,
+                    "topEventProbabilityBecomes": 0.01,
+                    "reduction": "98.8%"
+                }
+            ]
+        },
+        "suggestions": {
+            "designChanges": [
+                "Install automated belt tension monitoring system on CV-03.",
+                "Evaluate upgrade to vulcanized joint if mechanical splice reliability remains insufficient."
+            ],
+            "proceduralChanges": [
+                "Implement formal Management of Change (MOC) process for all maintenance procedures.",
+                "Update CV-03 Splice Installation Procedure to include mandatory torque and tension verification checklists.",
+                "Require OEM certification for technicians performing mechanical splices."
+            ],
+            "monitoringEnhancements": [
+                "Add pulley alignment checks to quarterly Preventive Maintenance (PM) schedule.",
+                "Include sticky material buildup inspection in daily operator rounds.",
+                "Audit work orders for splice installations to ensure torque records are attached."
+            ]
+        },
+        "standardsReferenced": [
+            "IEC 61025",
+            "IS/IEC 61508",
+            "MIL-STD-1629A",
+            "NASA-STD-3000",
+            "IS/ISO 31010"
+        ]
+    }
+}

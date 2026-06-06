@@ -15,6 +15,9 @@ import {
   updateAssistantMessage,
   clearConversationMessages,
   runFullAutomation,
+  downloadRcaReport,
+  exportFullAnalysis,
+  getCombinedAnalysis,
 } from "@/lib/rca.functions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -202,6 +205,9 @@ function CasePage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fiveWhyScrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const ftaAutoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timelineAutoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const parsedDataRef = useRef<any>(null);
 
   const currentAgent = AGENTS[agentStep];
 
@@ -253,6 +259,7 @@ function CasePage() {
   // Pareto States
   const [paretoThreshold, setParetoThreshold] = useState(80);
   const [paretoMode, setParetoMode] = useState<"cluster" | "trend">("cluster");
+  const [paretoFailureModes, setParetoFailureModes] = useState<Array<{ mode: string; frequency: number }>>([]);
 
   // Timeline States
   const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
@@ -276,6 +283,8 @@ function CasePage() {
     redundancyMet: false
   });
   const [editRootCauseText, setEditRootCauseText] = useState("");
+  const [reportDownloading, setReportDownloading] = useState<"xlsx" | "docx" | null>(null);
+  const [exportDownloading, setExportDownloading] = useState<"html" | "docx" | null>(null);
   const [streamingChatText, setStreamingChatText] = useState<string | null>(null);
   const [agentParsedData, setAgentParsedData] = useState<Record<string, any>>({});
   const [selectedCauseId, setSelectedCauseId] = useState<string>("");
@@ -288,6 +297,7 @@ function CasePage() {
     type: string; agent?: string; name?: string; step?: number; message?: string;
   }>>([]);
   const [autoRunning, setAutoRunning] = useState(false);
+  const [activeEditCat, setActiveEditCat] = useState("manpower");
 
   const generateHypothesisFn = useServerFn(generateAgentHypothesis);
   const hypothesisMut = useMutation({
@@ -548,6 +558,18 @@ function CasePage() {
     }
   });
 
+  const downloadReportFn = useServerFn(downloadRcaReport);
+  const exportFullAnalysisFn = useServerFn(exportFullAnalysis);
+  const getCombinedAnalysisFn = useServerFn(getCombinedAnalysis);
+
+  // Fetch all agents' data when on the report step
+  const combinedQ = useQuery({
+    queryKey: ["combined", caseId],
+    queryFn: () => getCombinedAnalysisFn({ data: { caseId } }),
+    enabled: currentAgent?.key === "report",
+    staleTime: 30_000,
+  });
+
   const runAutoFn = useServerFn(runFullAutomation);
   const autoMut = useMutation({
     mutationFn: async () => {
@@ -723,6 +745,27 @@ function CasePage() {
   const parsedData = currentAgent
     ? (agentParsedData[currentAgent.key] || (immediateParsed && typeof immediateParsed === "object" ? immediateParsed : null))
     : null;
+
+  // Keep a stable ref so debounced auto-save closures always have current parsedData
+  parsedDataRef.current = parsedData;
+
+  // Auto-save FTA when faultTree state changes (debounced 1.5s, silent)
+  useEffect(() => {
+    if (!faultTree || !convId || currentAgent?.key !== "fault_tree") return;
+    if (ftaAutoSaveTimer.current) clearTimeout(ftaAutoSaveTimer.current);
+    ftaAutoSaveTimer.current = setTimeout(() => {
+      const pd = parsedDataRef.current;
+      saveInteractiveStepMut.mutate({
+        ...(pd || {}),
+        tree: faultTree,
+        topEvent: faultTree.label,
+        gateType: faultTree.gateType,
+      });
+    }, 1500);
+    return () => {
+      if (ftaAutoSaveTimer.current) clearTimeout(ftaAutoSaveTimer.current);
+    };
+  }, [faultTree, convId]);
 
   // Auto scroll 5 Why investigation workspace when new questions stream or are added
   const stepsCount = messages.filter((m: any) => m.role === "assistant").length;
@@ -930,41 +973,74 @@ function CasePage() {
           }
         }
       } else if (currentAgent?.key === "fault_tree") {
-        let treeData = parsedData;
-        if (parsedData.faultTreeAnalysis?.tree) {
-          treeData = { ...parsedData.faultTreeAnalysis, tree: parsedData.faultTreeAnalysis.tree };
-        } else if (parsedData.faultTreeAnalysis?.topEvent || parsedData.faultTreeAnalysis?.branches) {
-          treeData = parsedData.faultTreeAnalysis;
-        }
-        if (treeData.tree) {
-          setFaultTree(treeData.tree);
-        } else {
-          const tree = {
-            id: "top-event",
-            label: treeData.topEvent || "Incident Failure Event",
-            type: "gate",
-            gateType: treeData.gateType || "OR",
-            probability: treeData.topProbability || 1.0,
-            children: [],
+        // Helper: check if a node has the expected schema (id, label, type)
+        const isValidTreeNode = (n: any) => n && (n.id || n.label) && n.type;
+
+        // Helper: normalise a non-standard tree object into the expected schema
+        const normaliseNode = (n: any, depth = 0): any => {
+          if (!n) return null;
+          const children = Array.isArray(n.children) ? n.children.map((c: any) => normaliseNode(c, depth + 1))
+            : Array.isArray(n.branches) ? n.branches.map((b: any, bi: number) => normaliseNode({ ...b, id: b.id || `branch-${depth}-${bi}` }, depth + 1))
+            : Array.isArray(n.causes) ? n.causes.map((c: any, ci: number) => ({
+                id: `cause-${depth}-${ci}`, label: typeof c === "string" ? c : c.label || "Cause",
+                type: "event", probability: (c.probability || c.likelihood || 0.1),
+              }))
+            : [];
+          return {
+            id: n.id || n.eventId || `node-${depth}`,
+            label: n.label || n.description || n.name || "Event",
+            type: n.type || (children.length > 0 ? "gate" : "event"),
+            // AI schema uses "gate" field; also handle "gate_type" alias
+            gateType: n.gateType || n.gate_type || n.gate || "OR",
+            probability: typeof n.probability === "number" ? n.probability : 0.3,
+            children,
+            // Preserve AI diagnostic metadata for event editor (read-only display)
+            failureMode: n.failureMode,
+            detectionMethod: n.detectionMethod,
+            evidenceFOR: n.evidenceFOR,
+            evidenceAGAINST: n.evidenceAGAINST,
           };
-          if (Array.isArray(treeData.branches)) {
-            tree.children = treeData.branches.map((b: any, bi: number) => ({
-              id: `branch-${bi}`,
-              label: b.label || b.description || "Sub-failure",
+        };
+
+        let rawTree: any = null;
+
+        if (parsedData.tree && isValidTreeNode(parsedData.tree)) {
+          rawTree = parsedData.tree;
+        } else if (parsedData.faultTreeAnalysis) {
+          const fta = parsedData.faultTreeAnalysis;
+          if (fta.tree && isValidTreeNode(fta.tree)) {
+            rawTree = fta.tree;
+          } else {
+            // Reconstruct from topEvent + branches
+            const topLabel = fta.topEvent?.description || fta.topEvent?.label || fta.topEvent || parsedData.tree?.label || "Incident Failure Event";
+            rawTree = {
+              id: fta.topEvent?.id || "top-event",
+              label: topLabel,
               type: "gate",
-              gateType: b.gateType || "OR",
-              probability: b.probability || 0.3,
-              children: Array.isArray(b.causes)
-                ? b.causes.map((c: string, ci: number) => ({
-                    id: `cause-${bi}-${ci}`,
-                    label: c,
-                    type: "event",
-                    probability: 0.1,
-                  }))
-                : [],
-            }));
+              gateType: fta.gateType || "OR",
+              probability: fta.topProbability || fta.topEvent?.probability || 1.0,
+              children: Array.isArray(fta.branches)
+                ? fta.branches.map((b: any, bi: number) => normaliseNode({ ...b, id: b.id || `branch-${bi}` }, 1))
+                : Array.isArray(fta.tree?.children)
+                  ? fta.tree.children.map((c: any) => normaliseNode(c, 1))
+                  : [],
+            };
           }
-          setFaultTree(tree);
+        } else if (parsedData.topEvent || parsedData.branches) {
+          rawTree = {
+            id: "top-event",
+            label: parsedData.topEvent || "Incident Failure Event",
+            type: "gate",
+            gateType: parsedData.gateType || "OR",
+            probability: parsedData.topProbability || 1.0,
+            children: Array.isArray(parsedData.branches)
+              ? parsedData.branches.map((b: any, bi: number) => normaliseNode({ ...b, id: b.id || `branch-${bi}` }, 1))
+              : [],
+          };
+        }
+
+        if (rawTree) {
+          setFaultTree(normaliseNode(rawTree));
         }
        } else if (currentAgent?.key === "timeline") {
         let timelineData = parsedData;
@@ -979,14 +1055,33 @@ function CasePage() {
           timelineData = { timeline: { phases: parsedData.timelineAnalysis.phases } };
           phases = parsedData.timelineAnalysis.phases;
         } else if (parsedData.timelineAndEventCorrelation) {
-          // Actual AI format: {"timelineAndEventCorrelation": {"phases": [...]}}
           const tec = parsedData.timelineAndEventCorrelation;
           if (tec.phases && Array.isArray(tec.phases)) {
             phases = tec.phases;
           } else if (tec.timeline?.phases && Array.isArray(tec.timeline.phases)) {
             phases = tec.timeline.phases;
+          } else if (tec.timeline && (tec.timeline.preIncidentPeriod || tec.timeline.incidentPeriod || tec.timeline.postIncidentPeriod)) {
+            // Period-based structure: convert period keys to a phases array
+            const periodDefs = [
+              { key: "preIncidentPeriod", label: "Pre-Incident Period" },
+              { key: "incidentPeriod", label: "Incident Period" },
+              { key: "postIncidentPeriod", label: "Post-Incident Period" },
+            ];
+            phases = periodDefs
+              .filter((pd) => tec.timeline[pd.key])
+              .map((pd) => {
+                const p = tec.timeline[pd.key];
+                return {
+                  phase: pd.label,
+                  start: p.start || "—",
+                  duration: p.end ? `${p.start || ""} → ${p.end}` : (p.start || "—"),
+                  description: p.description || "",
+                  events: (p.events || []).map((e: any) =>
+                    typeof e === "string" ? e : `${e.timestamp}: ${e.event}${e.notes ? ` [${e.notes}]` : ""}`
+                  ),
+                };
+              });
           } else {
-            // Try to extract phases from any nested structure
             for (const key of Object.keys(tec)) {
               if (Array.isArray(tec[key]) && tec[key].length > 0 && tec[key][0]?.phase) {
                 phases = tec[key];
@@ -1005,15 +1100,13 @@ function CasePage() {
           setTimelineEvents(timelineData.timeline.phases);
         }
        } else if (currentAgent?.key === "pareto") {
-        let paretoData = parsedData;
-        if (parsedData.paretoAnalysis?.byFailureMode) {
-          // Standard format
-        } else if (parsedData.paretoAnalysisResult?.paretoAnalysis) {
-          paretoData = { ...parsedData, paretoAnalysis: parsedData.paretoAnalysisResult.paretoAnalysis };
+        let byFailureMode: Array<{ mode: string; frequency: number }> = [];
+        if (parsedData.paretoAnalysis?.byFailureMode && Array.isArray(parsedData.paretoAnalysis.byFailureMode)) {
+          byFailureMode = parsedData.paretoAnalysis.byFailureMode;
+        } else if (parsedData.paretoAnalysisResult?.paretoAnalysis?.byFailureMode) {
+          byFailureMode = parsedData.paretoAnalysisResult.paretoAnalysis.byFailureMode;
         } else if (parsedData.paretoAndTrendAnalysis) {
-          // Actual AI response format: {"paretoAndTrendAnalysis": {"paretoAnalysis": {"byFailureType": {"categories": [...]}}}}
           const pta = parsedData.paretoAndTrendAnalysis;
-          let byFailureMode = [];
           if (pta.paretoAnalysis?.byFailureType?.categories && Array.isArray(pta.paretoAnalysis.byFailureType.categories)) {
             byFailureMode = pta.paretoAnalysis.byFailureType.categories.map((c: any) => ({
               mode: c.name || c.label || c.category || c.mode || "Unknown",
@@ -1022,19 +1115,27 @@ function CasePage() {
           } else if (pta.paretoAnalysis?.byFailureMode && Array.isArray(pta.paretoAnalysis.byFailureMode)) {
             byFailureMode = pta.paretoAnalysis.byFailureMode;
           }
-          if (byFailureMode.length > 0) {
-            paretoData = { ...parsedData, paretoAnalysis: { byFailureMode } };
-          }
+        }
+        if (byFailureMode.length > 0) {
+          setParetoFailureModes(byFailureMode);
         }
       } else if (currentAgent?.key === "equipment") {
-        let equipData = parsedData;
-        if (parsedData.equipmentAnalysis?.reliabilityMetrics) {
-          equipData = { reliabilityMetrics: parsedData.equipmentAnalysis.reliabilityMetrics };
-        } else if (parsedData.equipmentAnalysis?.rpnScores) {
-          equipData = { reliabilityMetrics: { rpnScores: parsedData.equipmentAnalysis.rpnScores } };
+        // Normalize nested formats to flat reliabilityMetrics
+        let metrics = parsedData.reliabilityMetrics;
+        if (!metrics && parsedData.equipmentAnalysis?.reliabilityMetrics) {
+          metrics = parsedData.equipmentAnalysis.reliabilityMetrics;
+        } else if (!metrics && parsedData.equipmentAnalysis?.rpnScores) {
+          metrics = { rpnScores: parsedData.equipmentAnalysis.rpnScores };
         }
-        if (equipData.reliabilityMetrics?.rpnScores) {
-          setEquipmentRPN(equipData.reliabilityMetrics.rpnScores);
+        if (metrics?.rpnScores) {
+          setEquipmentRPN(metrics.rpnScores);
+        }
+        // If the AI returned the data under a nested key, normalise parsedData so the render can read it directly
+        if (metrics && !parsedData.reliabilityMetrics) {
+          setAgentParsedData((prev) => ({
+            ...prev,
+            equipment: { ...parsedData, reliabilityMetrics: metrics },
+          }));
         }
        } else if (currentAgent?.key === "report") {
         let reportData: any = parsedData;
@@ -1081,16 +1182,25 @@ function CasePage() {
     }
   }, [parsedData, messages, currentAgent?.key, convId]);
 
-  const renderMessageContent = (content: string, role: string) => {
+  const renderMessageContent = (content: string, role: string, isCompletedRecord = false) => {
     if (role === "assistant") {
       const parsed = parseMaybeJson(content);
       if (parsed && typeof parsed === "object") {
         return <AgentResponseRenderer data={parsed} />;
       }
-      
-      // If it looks like JSON but hasn't parsed successfully yet (e.g. streaming), show a premium loading indicator
+
+      // Incomplete/partial JSON
       const trimmed = content.trim();
       if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        if (isCompletedRecord) {
+          // Past saved message — don't show loading spinner
+          return (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono p-1">
+              <span className="text-primary font-bold">✓</span>
+              Analysis workspace data saved
+            </div>
+          );
+        }
         return (
           <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono italic p-1 animate-pulse">
             <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0" />
@@ -2789,7 +2899,6 @@ function CasePage() {
                 )}
 
                 {currentStepType === "final" && (() => {
-                  const [activeEditCat, setActiveEditCat] = useState("manpower");
                   const causes = fishboneCategories[activeEditCat] || [];
 
                   return (
@@ -3208,6 +3317,14 @@ function CasePage() {
       case "fault_tree": {
         if (!faultTree) return null;
 
+        // Extract AI-provided rich data if available (nested under faultTreeAnalysis)
+        const ftaAI = parsedData?.faultTreeAnalysis;
+        const aiCutSets: any[] | null = Array.isArray(ftaAI?.minimalCutSets) ? ftaAI.minimalCutSets : null;
+        const aiImportance: any[] | null = Array.isArray(ftaAI?.structuralImportance?.mostCriticalBasicEvents)
+          ? ftaAI.structuralImportance.mostCriticalBasicEvents : null;
+        const aiSuggestions: any = ftaAI?.suggestions ?? null;
+        const aiStandards: string[] | null = Array.isArray(ftaAI?.standardsReferenced) ? ftaAI.standardsReferenced : null;
+
         if (!faultTree) {
           return (
             <div className="flex-1 flex flex-col items-center justify-center p-12 space-y-6 text-center">
@@ -3294,11 +3411,12 @@ function CasePage() {
         const calculateProbabilities = (node: any): any => {
           if (!node) return null;
           if (node.type === "event") {
-            return node;
+            // Keep AI-provided probability; default to 0.1 so gates don't collapse to 0
+            return { ...node, probability: node.probability > 0 ? node.probability : 0.1 };
           }
 
           const calculatedChildren = (node.children || []).map((c: any) => calculateProbabilities(c));
-          
+
           let prob = 0.0;
           if (calculatedChildren.length > 0) {
             const childProbs = calculatedChildren.map((c: any) => c.probability || 0.0);
@@ -3311,9 +3429,13 @@ function CasePage() {
             }
           }
 
+          // If the computed probability is 0 but the AI provided a meaningful value, use the AI's value.
+          // This prevents the diagram going blank when the model assigned conceptual probabilities to gate nodes.
+          const finalProb = (prob > 0) ? prob : (node.probability > 0 ? node.probability : 0);
+
           return {
             ...node,
-            probability: parseFloat(prob.toFixed(4)),
+            probability: parseFloat(finalProb.toFixed(4)),
             children: calculatedChildren
           };
         };
@@ -3356,49 +3478,78 @@ function CasePage() {
 
         const cutSets = computeCutSets(computedTree);
 
+        const truncSvg = (text: string, max: number) =>
+          text && text.length > max ? text.slice(0, max - 1) + "…" : (text || "—");
+
+        const countLeaves = (n: any): number => {
+          if (!n || !n.children || n.children.length === 0) return 1;
+          return n.children.reduce((s: number, c: any) => s + countLeaves(c), 0);
+        };
+
         const renderTreeSvg = (node: any, x: number, y: number, spread: number): React.ReactNode => {
           const children = node.children || [];
           const childCount = children.length;
-          
+
           let borderCol = "stroke-emerald-500 fill-emerald-500/10";
           if (node.probability > 0.05 && node.probability <= 0.2) borderCol = "stroke-amber-500 fill-amber-500/10";
           if (node.probability > 0.2) borderCol = "stroke-red-500 fill-red-500/10";
 
+          const label = node.label || "";
+          const line1 = truncSvg(label, 22);
+          const line2 = label.length > 22 ? truncSvg(label.slice(21), 21) : null;
+          const NODE_H = 70;
+          const NODE_W = 160;
+          const NODE_HALF_W = NODE_W / 2;
+          const NODE_HALF_H = NODE_H / 2;
+          const LEVEL_GAP = 115;
+          const MIN_SPACING = 175;
+
           return (
             <g key={node.id}>
               {childCount > 0 && children.map((child: any, i: number) => {
-                const childSpread = spread / Math.max(1, childCount * 0.7);
-                const cx = x + (i - (childCount - 1) / 2) * spread;
-                const cy = y + 100;
+                const effectiveSpread = Math.max(MIN_SPACING, spread / childCount);
+                const cx = x + (i - (childCount - 1) / 2) * effectiveSpread;
+                const cy = y + LEVEL_GAP;
                 return (
                   <g key={child.id}>
-                    <line x1={x} y1={y + 30} x2={cx} y2={cy - 30} stroke="currentColor" strokeWidth="2" className="text-border" />
-                    {renderTreeSvg(child, cx, cy, childSpread)}
+                    <line x1={x} y1={y + NODE_HALF_H} x2={cx} y2={cy - NODE_HALF_H}
+                      stroke="currentColor" strokeWidth="1.5" className="text-border" />
+                    {renderTreeSvg(child, cx, cy, effectiveSpread * 0.85)}
                   </g>
                 );
               })}
 
-              <g transform={`translate(${x - 75}, ${y - 30})`} className="cursor-pointer" onClick={() => setSelectedFTAEvent(node)}>
-                <rect width="150" height="60" rx="6" className={`${borderCol}`} strokeWidth="2.5" />
-                
+              <g transform={`translate(${x - NODE_HALF_W}, ${y - NODE_HALF_H})`}
+                className="cursor-pointer" onClick={() => setSelectedFTAEvent(node)}>
+                <rect width={NODE_W} height={NODE_H} rx="6" className={borderCol} strokeWidth="2" />
+
                 {node.type === "gate" && (
-                  <g transform="translate(10, 32)">
-                    <circle cx="8" cy="8" r="7" className="fill-secondary stroke-primary" strokeWidth="1.5" />
-                    <text x="8" y="11" textAnchor="middle" className="text-[8px] font-bold font-mono fill-primary">
-                      {node.gateType === "AND" ? "└" : node.gateType === "OR" ? "⌣" : "⊘"}
+                  <g transform="translate(8, 38)">
+                    <circle cx="8" cy="7" r="7" className="fill-secondary stroke-primary" strokeWidth="1.5" />
+                    <text x="8" y="11" textAnchor="middle" fontSize="9" fontFamily="monospace" fontWeight="bold" className="fill-primary">
+                      {node.gateType === "AND" ? "∧" : node.gateType === "OR" ? "∨" : "¬"}
                     </text>
                   </g>
                 )}
 
-                <text x="75" y="16" textAnchor="middle" className="text-[9px] fill-muted-foreground font-mono font-bold uppercase truncate w-[130px]">
+                <text x={NODE_HALF_W} y="15" textAnchor="middle" fontSize="8" fontFamily="monospace"
+                  fontWeight="bold" style={{ fill: "var(--muted-foreground)", textTransform: "uppercase" }}>
                   {node.type === "gate" ? `${node.gateType} GATE` : "EVENT"}
                 </text>
-                
-                <text x="75" y="32" textAnchor="middle" className="text-[10px] font-bold fill-foreground truncate w-[130px]">
-                  {node.label}
+
+                <text x={NODE_HALF_W} y={line2 ? "30" : "36"} textAnchor="middle" fontSize="9"
+                  fontWeight="600" style={{ fill: "var(--foreground)" }}>
+                  {line1}
                 </text>
-                
-                <text x="75" y="48" textAnchor="middle" className="text-[9px] font-mono fill-primary font-semibold">
+                {line2 && (
+                  <text x={NODE_HALF_W} y="42" textAnchor="middle" fontSize="9"
+                    fontWeight="600" style={{ fill: "var(--foreground)" }}>
+                    {line2}
+                  </text>
+                )}
+
+                <text x={NODE_HALF_W} y={line2 ? "60" : "56"} textAnchor="middle" fontSize="8"
+                  fontFamily="monospace" fontWeight="600" style={{ fill: "var(--primary)" }}>
                   P: {(node.probability * 100).toFixed(2)}%
                 </text>
               </g>
@@ -3415,13 +3566,22 @@ function CasePage() {
               </Button>
             </div>
 
-            <div className="bg-secondary/20 border border-border/50 rounded-xl p-4 overflow-auto flex justify-center">
-              <div className="min-w-[800px] h-[340px] relative">
-                <svg className="w-full h-full" viewBox="0 0 800 340">
-                  {computedTree && renderTreeSvg(computedTree, 400, 45, 260)}
-                </svg>
-              </div>
-            </div>
+            {(() => {
+              const leafCount = countLeaves(computedTree);
+              const svgW = Math.max(900, leafCount * 185 + 200);
+              const svgH = 400;
+              const cx = svgW / 2;
+              const initialSpread = Math.max(280, (leafCount * 185) / 2);
+              return (
+                <div className="bg-secondary/20 border border-border/50 rounded-xl p-4 overflow-x-auto">
+                  <div style={{ width: svgW, height: svgH }} className="relative">
+                    <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`}>
+                      {computedTree && renderTreeSvg(computedTree, cx, 50, initialSpread)}
+                    </svg>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="grid md:grid-cols-3 gap-6">
               <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-4">
@@ -3470,6 +3630,36 @@ function CasePage() {
                       </div>
                     )}
 
+                    {/* AI diagnostic metadata — read-only */}
+                    {(selectedFTAEvent.failureMode || selectedFTAEvent.detectionMethod) && (
+                      <div className="space-y-2 pt-2 border-t border-border/20">
+                        {selectedFTAEvent.failureMode && (
+                          <div>
+                            <span className="text-[10px] text-muted-foreground font-mono block">FAILURE MODE</span>
+                            <span className="text-xs font-medium">{selectedFTAEvent.failureMode}</span>
+                          </div>
+                        )}
+                        {selectedFTAEvent.detectionMethod && (
+                          <div>
+                            <span className="text-[10px] text-muted-foreground font-mono block">DETECTION METHOD</span>
+                            <span className="text-xs font-medium">{selectedFTAEvent.detectionMethod}</span>
+                          </div>
+                        )}
+                        {selectedFTAEvent.evidenceFOR && selectedFTAEvent.evidenceFOR !== "None" && (
+                          <div>
+                            <span className="text-[10px] text-emerald-400 font-mono block">EVIDENCE FOR</span>
+                            <span className="text-xs text-muted-foreground">{selectedFTAEvent.evidenceFOR}</span>
+                          </div>
+                        )}
+                        {selectedFTAEvent.evidenceAGAINST && selectedFTAEvent.evidenceAGAINST !== "None" && (
+                          <div>
+                            <span className="text-[10px] text-rose-400 font-mono block">EVIDENCE AGAINST</span>
+                            <span className="text-xs text-muted-foreground">{selectedFTAEvent.evidenceAGAINST}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex gap-2 pt-3 border-t border-border/20">
                       {selectedFTAEvent.type === "gate" && (
                         <>
@@ -3491,24 +3681,67 @@ function CasePage() {
                 )}
               </div>
 
+              {/* Minimal Cut Sets — prefer AI-provided data, fall back to computed */}
               <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3">
                 <span className="text-xs text-primary font-bold mono">// MINIMAL CUT SETS ANALYSIS</span>
                 <p className="text-[10px] text-muted-foreground">Sets of basic failures that independently trigger the Top Event:</p>
-                <div className="space-y-1.5 max-h-[160px] overflow-y-auto">
-                  {cutSets.map((set, i) => (
+                <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                  {aiCutSets ? aiCutSets.map((cs: any, i: number) => (
+                    <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-primary font-bold font-mono">{cs.cutSetId || `MCS-${i + 1}`}</span>
+                        {cs.criticality && (
+                          <Badge className={`text-[9px] px-1.5 py-0 font-mono ${
+                            cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
+                            cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
+                            "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                          }`}>{cs.criticality.toUpperCase()}</Badge>
+                        )}
+                        {cs.probability !== undefined && (
+                          <span className="font-mono text-muted-foreground ml-auto text-[10px]">P: {(cs.probability * 100).toFixed(0)}%</span>
+                        )}
+                      </div>
+                      {cs.description && (
+                        <p className="text-muted-foreground text-[10px] leading-relaxed mb-1">{cs.description}</p>
+                      )}
+                      {Array.isArray(cs.basicEvents) && (
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {cs.basicEvents.map((be: string) => (
+                            <span key={be} className="text-[9px] font-mono px-1.5 py-0.5 bg-primary/10 text-primary rounded border border-primary/20">{be}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )) : cutSets.map((set, i) => (
                     <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs font-mono">
-                      <span className="text-primary font-bold">Cutset {i+1}: </span>
+                      <span className="text-primary font-bold">Cutset {i + 1}: </span>
                       <span>{set.join(" AND ")}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
+              {/* Structural Importance — prefer AI data, fall back to computed Fussell-Vesely */}
               <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3">
-                <span className="text-xs text-primary font-bold mono">// SENSITIVITY (FUSSELL-VESELY)</span>
-                <p className="text-[10px] text-muted-foreground">Importance measure representing contribution to overall risk:</p>
-                <div className="space-y-2 max-h-[160px] overflow-y-auto">
-                  {sensitivityList.map((item, i) => (
+                <span className="text-xs text-primary font-bold mono">
+                  {aiImportance ? "// STRUCTURAL IMPORTANCE" : "// SENSITIVITY (FUSSELL-VESELY)"}
+                </span>
+                <p className="text-[10px] text-muted-foreground">
+                  {aiImportance ? "Critical events ranked by structural importance with corrective recommendations:" : "Importance measure representing contribution to overall risk:"}
+                </p>
+                <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                  {aiImportance ? aiImportance.map((item: any, i: number) => (
+                    <div key={i} className="text-xs border border-border/30 rounded p-2 bg-background/30">
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="font-mono font-bold text-primary">{item.eventId}</span>
+                        <span className="font-mono font-bold text-primary">{(item.structuralImportance * 100).toFixed(0)}%</span>
+                      </div>
+                      <p className="text-muted-foreground text-[10px] mb-1">• {item.description}</p>
+                      {item.recommendation && (
+                        <p className="text-[10px] text-amber-400/90 italic leading-relaxed">→ {item.recommendation}</p>
+                      )}
+                    </div>
+                  )) : sensitivityList.map((item, i) => (
                     <div key={i} className="flex justify-between items-center text-xs font-mono">
                       <span className="truncate flex-1 text-muted-foreground pr-2">• {item.label}</span>
                       <span className="font-bold text-primary">{item.fv}%</span>
@@ -3517,6 +3750,58 @@ function CasePage() {
                 </div>
               </div>
             </div>
+
+            {/* Suggestions — shown only when AI provides them */}
+            {aiSuggestions && (
+              <div className="grid md:grid-cols-3 gap-4">
+                {aiSuggestions.designChanges?.length > 0 && (
+                  <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4 space-y-2">
+                    <span className="text-xs text-blue-400 font-bold mono">// DESIGN CHANGES</span>
+                    <ul className="space-y-1.5">
+                      {aiSuggestions.designChanges.map((s: string, i: number) => (
+                        <li key={i} className="text-xs text-muted-foreground flex items-start gap-1.5">
+                          <span className="text-blue-400 font-bold shrink-0 mt-0.5">•</span>{s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {aiSuggestions.proceduralChanges?.length > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 space-y-2">
+                    <span className="text-xs text-amber-400 font-bold mono">// PROCEDURAL CHANGES</span>
+                    <ul className="space-y-1.5">
+                      {aiSuggestions.proceduralChanges.map((s: string, i: number) => (
+                        <li key={i} className="text-xs text-muted-foreground flex items-start gap-1.5">
+                          <span className="text-amber-400 font-bold shrink-0 mt-0.5">•</span>{s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {aiSuggestions.monitoringEnhancements?.length > 0 && (
+                  <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 space-y-2">
+                    <span className="text-xs text-emerald-400 font-bold mono">// MONITORING ENHANCEMENTS</span>
+                    <ul className="space-y-1.5">
+                      {aiSuggestions.monitoringEnhancements.map((s: string, i: number) => (
+                        <li key={i} className="text-xs text-muted-foreground flex items-start gap-1.5">
+                          <span className="text-emerald-400 font-bold shrink-0 mt-0.5">•</span>{s}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Standards Referenced */}
+            {aiStandards && aiStandards.length > 0 && (
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-[10px] text-muted-foreground font-mono uppercase">// Standards:</span>
+                {aiStandards.map((s: string) => (
+                  <Badge key={s} variant="outline" className="text-[10px] font-mono text-muted-foreground border-border/50">{s}</Badge>
+                ))}
+              </div>
+            )}
 
             {/* Iterative Q&A Panel */}
             <div className="border border-border/50 rounded-xl overflow-hidden">
@@ -3527,8 +3812,8 @@ function CasePage() {
                 const parsed = parseMaybeJson(m.content);
                 return (
                   <div key={i} className="p-3 border-b border-border/20 text-xs">
-                    {parsed?.tree ? (
-                      <p className="text-muted-foreground font-mono">// Fault tree diagram updated ✓</p>
+                    {(parsed?.tree || parsed?.faultTreeAnalysis) ? (
+                      <p className="text-muted-foreground font-mono">// Fault tree analysis updated ✓</p>
                     ) : (
                       <p className="text-muted-foreground whitespace-pre-wrap">{m.content.slice(0, 300)}{m.content.length > 300 ? '...' : ''}</p>
                     )}
@@ -3542,23 +3827,21 @@ function CasePage() {
       }
 
        case "pareto": {
-        let pareto = {};
-        let byFailureMode = [];
-
-        // Normalize: try multiple possible AI response formats
-        if (parsedData.paretoAnalysis?.byFailureMode) {
-          pareto = parsedData.paretoAnalysis;
-          byFailureMode = parsedData.paretoAnalysis.byFailureMode;
-        } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureType?.categories) {
-          byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureType.categories.map((c: any) => ({
-            mode: c.name || c.label || c.category || c.mode || "Unknown",
-            frequency: c.frequency || c.count || c.value || 0,
-          }));
-        } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureMode) {
-          byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureMode;
+        // Use persisted state first (populated by useEffect when messages load),
+        // then fall back to live inline parse from parsedData for streaming
+        let byFailureMode: Array<{ mode: string; frequency: number }> = paretoFailureModes;
+        if (byFailureMode.length === 0 && parsedData) {
+          if (parsedData.paretoAnalysis?.byFailureMode) {
+            byFailureMode = parsedData.paretoAnalysis.byFailureMode;
+          } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureType?.categories) {
+            byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureType.categories.map((c: any) => ({
+              mode: c.name || c.label || c.category || c.mode || "Unknown",
+              frequency: c.frequency || c.count || c.value || 0,
+            }));
+          } else if (parsedData.paretoAndTrendAnalysis?.paretoAnalysis?.byFailureMode) {
+            byFailureMode = parsedData.paretoAndTrendAnalysis.paretoAnalysis.byFailureMode;
+          }
         }
-
-        pareto = { byFailureMode, ...pareto };
 
         const sortedModes = [...byFailureMode].sort((a, b) => b.frequency - a.frequency);
         
@@ -3616,7 +3899,7 @@ function CasePage() {
                   const updatedPayload = {
                     ...parsedData,
                     paretoAnalysis: {
-                      ...pareto,
+                      byFailureMode,
                       vitalFew: vitalFew
                     }
                   };
@@ -3776,23 +4059,26 @@ function CasePage() {
 
        case "timeline": {
         let timeline: any = {};
-        let phases: any[] = [];
+        let dbPhases: any[] = [];
 
         // Normalize: try multiple possible AI response formats
         if (parsedData.timeline?.phases) {
           timeline = parsedData.timeline;
-          phases = parsedData.timeline.phases;
+          dbPhases = parsedData.timeline.phases;
         } else if (parsedData.timelineAndEventCorrelation?.phases) {
-          phases = parsedData.timelineAndEventCorrelation.phases;
-          timeline = { phases };
+          dbPhases = parsedData.timelineAndEventCorrelation.phases;
+          timeline = { phases: dbPhases };
         } else if (parsedData.timelineAndEventCorrelation?.timeline?.phases) {
           timeline = parsedData.timelineAndEventCorrelation.timeline;
-          phases = timeline.phases;
+          dbPhases = timeline.phases;
         } else {
           timeline = parsedData.timeline || {};
         }
 
-        phases = Array.isArray(phases) ? phases : [];
+        dbPhases = Array.isArray(dbPhases) ? dbPhases : [];
+
+        // Use local timelineEvents state for responsive editing; seed from DB on first load
+        const phases = timelineEvents.length > 0 ? timelineEvents : dbPhases;
 
         const addPhase = () => {
           setNewPhaseName("New Phase");
@@ -3822,6 +4108,7 @@ function CasePage() {
               phases: updatedPhases
             }
           };
+          setTimelineEvents(updatedPhases);
           updateAgentMsgMut.mutate(updatedPayload);
           setShowAddPhaseModal(false);
           toast.success("Timeline phase added!");
@@ -3831,23 +4118,24 @@ function CasePage() {
           const updated = phases.map((p: any, i: number) =>
             i === index ? { ...p, [key]: value } : p
           );
-          updateAgentMsgMut.mutate({
-            ...parsedData,
-            timeline: { ...timeline, phases: updated }
-          });
+          setTimelineEvents(updated);
+          if (timelineAutoSaveTimer.current) clearTimeout(timelineAutoSaveTimer.current);
+          timelineAutoSaveTimer.current = setTimeout(() => {
+            saveInteractiveStepMut.mutate({
+              ...(parsedDataRef.current || {}),
+              timeline: { ...timeline, phases: updated },
+            });
+          }, 1000);
         };
 
         const deletePhase = (index: number) => {
           if (!confirm("Are you sure you want to delete this phase?")) return;
           const updatedPhases = phases.filter((_: any, i: number) => i !== index);
-          const updatedPayload = {
+          setTimelineEvents(updatedPhases);
+          updateAgentMsgMut.mutate({
             ...parsedData,
-            timeline: {
-              ...timeline,
-              phases: updatedPhases
-            }
-          };
-          updateAgentMsgMut.mutate(updatedPayload);
+            timeline: { ...timeline, phases: updatedPhases },
+          });
           toast.info("Timeline phase removed.");
         };
 
@@ -3859,7 +4147,7 @@ function CasePage() {
                 <Button size="sm" onClick={addPhase}>
                   <Plus className="w-3.5 h-3.5 mr-1" /> Insert Phase
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => updateAgentMsgMut.mutate(parsedData)} disabled={updateAgentMsgMut.isPending}>
+                <Button size="sm" variant="outline" onClick={() => updateAgentMsgMut.mutate({ ...parsedData, timeline: { ...timeline, phases } })} disabled={updateAgentMsgMut.isPending}>
                   {updateAgentMsgMut.isPending ? "Saving..." : "Save Sequence"}
                 </Button>
               </div>
@@ -3963,18 +4251,266 @@ function CasePage() {
                     {Array.isArray(phase.events) && phase.events.length > 0 && (
                       <div className="mt-3 space-y-1.5 pl-3 border-l border-primary/20">
                         <span className="text-[10px] text-muted-foreground font-mono block mb-1">SUB-EVENTS</span>
-                        {phase.events.map((e: any, i: number) => (
-                          <div key={i} className="text-xs flex items-start gap-1">
-                            <span className="text-primary font-bold shrink-0">•</span>
-                            <span className="text-muted-foreground">{typeof e === "string" ? e : e.desc || JSON.stringify(e)}</span>
-                          </div>
-                        ))}
+                        {phase.events.map((e: any, i: number) => {
+                          if (typeof e === "string") {
+                            return (
+                              <div key={i} className="text-xs flex items-start gap-1">
+                                <span className="text-primary font-bold shrink-0">•</span>
+                                <span className="text-muted-foreground">{e}</span>
+                              </div>
+                            );
+                          }
+                          const sigColor = e.significance === "critical" ? "text-rose-400" : e.significance === "high" ? "text-amber-400" : "text-muted-foreground";
+                          return (
+                            <div key={i} className="text-xs border border-border/30 rounded p-2 bg-secondary/20 space-y-0.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {e.timestamp && <span className="font-mono text-primary text-[10px]">{e.timestamp}</span>}
+                                {e.significance && <span className={`text-[9px] uppercase font-bold ${sigColor}`}>{e.significance}</span>}
+                                {e.category && <span className="text-[9px] text-muted-foreground/60 uppercase">{e.category}</span>}
+                                {e.isTripEvent && <span className="text-[9px] bg-rose-500/20 text-rose-400 px-1 rounded uppercase font-bold">TRIP</span>}
+                                {e.isFirstDeviation && <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1 rounded uppercase font-bold">FIRST DEV</span>}
+                              </div>
+                              <p className="text-foreground">{e.event || e.desc}</p>
+                              {e.notes && <p className="text-muted-foreground/70 text-[10px] italic">{e.notes}</p>}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
                 );
               })}
             </div>
+
+            {/* Rich sections for timelineAndEventCorrelation format */}
+            {parsedData.timelineAndEventCorrelation && (() => {
+              const tec = parsedData.timelineAndEventCorrelation;
+              return (
+                <>
+                  {/* Incident Overview */}
+                  {tec.incidentOverview && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// INCIDENT OVERVIEW</p>
+                      </div>
+                      <div className="p-4 grid grid-cols-2 md:grid-cols-3 gap-3">
+                        {([
+                          { label: "INCIDENT ID", value: tec.incidentId },
+                          { label: "DATE", value: tec.incidentOverview.incidentDate },
+                          { label: "EQUIPMENT", value: tec.incidentOverview.equipment },
+                          { label: "LOCATION", value: tec.incidentOverview.location },
+                          { label: "DURATION", value: tec.incidentOverview.totalDuration },
+                          { label: "SHIFT", value: tec.incidentOverview.shift },
+                          { label: "OPERATOR", value: tec.incidentOverview.operatorOnDuty },
+                          { label: "ANALYST", value: tec.analyst },
+                        ] as {label: string; value: string | undefined}[]).filter((f) => f.value).map((f, i) => (
+                          <div key={i} className="space-y-0.5">
+                            <span className="text-[9px] text-muted-foreground font-mono uppercase">{f.label}</span>
+                            <p className="text-xs text-foreground font-medium">{f.value}</p>
+                          </div>
+                        ))}
+                        {tec.incidentOverview.severity && (
+                          <div className="col-span-full space-y-0.5">
+                            <span className="text-[9px] text-muted-foreground font-mono uppercase">SEVERITY</span>
+                            <p className="text-xs text-rose-400 font-medium">{tec.incidentOverview.severity}</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Causal Chain */}
+                  {Array.isArray(tec.eventCorrelation?.causalChain) && tec.eventCorrelation.causalChain.length > 0 && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// CAUSAL CHAIN ANALYSIS</p>
+                      </div>
+                      <div className="p-4 space-y-3">
+                        {tec.eventCorrelation.causalChain.map((step: any, i: number) => (
+                          <div key={i} className="flex gap-3 items-start">
+                            <span className="shrink-0 w-7 h-7 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold">{step.step}</span>
+                            <div className="flex-1 border border-border/30 rounded-lg p-3 space-y-1.5 bg-background/50">
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <span className="text-[9px] text-rose-400/70 font-mono uppercase">CAUSE</span>
+                                  <p className="text-xs text-foreground">{step.cause}</p>
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-emerald-400/70 font-mono uppercase">EFFECT</span>
+                                  <p className="text-xs text-foreground">{step.effect}</p>
+                                </div>
+                              </div>
+                              <div className="flex gap-4">
+                                {step.timeSpan && <span className="text-[10px] text-muted-foreground font-mono">{step.timeSpan}</span>}
+                                {step.confidence && <span className="text-[10px] font-mono text-amber-400">Confidence: {step.confidence}%</span>}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Deviation Timeline */}
+                  {tec.deviationTimeline && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// DEVIATION TIMELINE</p>
+                      </div>
+                      <div className="p-4 space-y-4">
+                        {tec.deviationTimeline.firstDeviation && (
+                          <div className="bg-rose-500/10 border border-rose-500/30 rounded-lg p-3">
+                            <span className="text-[9px] text-rose-400 font-mono uppercase font-bold">First Deviation</span>
+                            <p className="text-xs text-foreground mt-1">
+                              <span className="font-mono text-rose-300">{tec.deviationTimeline.firstDeviation.timestamp}</span>
+                              {" — "}{tec.deviationTimeline.firstDeviation.parameter}: {tec.deviationTimeline.firstDeviation.deviation}
+                            </p>
+                          </div>
+                        )}
+                        {tec.deviationTimeline.earliestWarningSign && (
+                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                            <span className="text-[9px] text-amber-400 font-mono uppercase font-bold">Earliest Warning Sign</span>
+                            <p className="text-xs text-foreground mt-1">
+                              <span className="font-mono text-amber-300">{tec.deviationTimeline.earliestWarningSign.timestamp}</span>
+                              {" — "}{tec.deviationTimeline.earliestWarningSign.description}
+                            </p>
+                            {tec.deviationTimeline.earliestWarningSign.missedOpportunity && (
+                              <p className="text-[11px] text-muted-foreground mt-1 italic">Missed: {tec.deviationTimeline.earliestWarningSign.missedOpportunity}</p>
+                            )}
+                          </div>
+                        )}
+                        {Array.isArray(tec.deviationTimeline.deviationProgression) && tec.deviationTimeline.deviationProgression.length > 0 && (
+                          <div className="relative border-l border-amber-500/30 ml-2 pl-4 space-y-3">
+                            <span className="text-[9px] text-muted-foreground font-mono uppercase block mb-2">Progression</span>
+                            {tec.deviationTimeline.deviationProgression.map((dp: any, i: number) => (
+                              <div key={i} className="relative">
+                                <span className="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full bg-amber-500/60 border border-background" />
+                                <div className="border border-border/30 rounded p-2 bg-background/50">
+                                  <div className="flex gap-2 items-center flex-wrap mb-0.5">
+                                    <span className="font-mono text-[10px] text-amber-400">{dp.time}</span>
+                                    <span className="text-[10px] text-foreground font-medium">{dp.parameter}</span>
+                                    <span className={`text-[9px] uppercase font-bold px-1 rounded ${dp.status === "Failed" ? "bg-rose-500/20 text-rose-400" : dp.status === "Critical" ? "bg-orange-500/20 text-orange-400" : "bg-amber-500/20 text-amber-400"}`}>{dp.status}</span>
+                                  </div>
+                                  {dp.notes && <p className="text-[11px] text-muted-foreground">{dp.notes}</p>}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Timeline Gaps */}
+                  {Array.isArray(tec.timelineGaps) && tec.timelineGaps.length > 0 && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// TIMELINE GAPS & MISSING DATA</p>
+                      </div>
+                      <div className="p-4 space-y-3">
+                        {tec.timelineGaps.map((gap: any, i: number) => (
+                          <div key={i} className="border border-amber-500/30 rounded-lg p-3 bg-amber-500/5 space-y-1">
+                            <span className="font-mono text-[10px] text-amber-400 font-bold">{gap.gapPeriod}</span>
+                            <p className="text-xs text-foreground">{gap.description}</p>
+                            {gap.impact && <p className="text-[11px] text-rose-400/80">Impact: {gap.impact}</p>}
+                            {gap.recommendation && <p className="text-[11px] text-emerald-400/80">Rec: {gap.recommendation}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Suggestions */}
+                  {tec.suggestions && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// RECOMMENDATIONS</p>
+                      </div>
+                      <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {Array.isArray(tec.suggestions.immediateActions) && tec.suggestions.immediateActions.length > 0 && (
+                          <div className="border border-rose-500/30 rounded-lg p-3 bg-rose-500/5 space-y-2">
+                            <span className="text-[9px] text-rose-400 font-mono uppercase font-bold">IMMEDIATE ACTIONS</span>
+                            <ul className="space-y-1.5">
+                              {tec.suggestions.immediateActions.map((action: string, i: number) => (
+                                <li key={i} className="text-xs flex items-start gap-1.5">
+                                  <span className="text-rose-400 font-bold shrink-0">→</span>
+                                  <span className="text-foreground">{action}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {Array.isArray(tec.suggestions.shortTermActions) && tec.suggestions.shortTermActions.length > 0 && (
+                          <div className="border border-amber-500/30 rounded-lg p-3 bg-amber-500/5 space-y-2">
+                            <span className="text-[9px] text-amber-400 font-mono uppercase font-bold">SHORT-TERM ACTIONS</span>
+                            <ul className="space-y-1.5">
+                              {tec.suggestions.shortTermActions.map((action: string, i: number) => (
+                                <li key={i} className="text-xs flex items-start gap-1.5">
+                                  <span className="text-amber-400 font-bold shrink-0">→</span>
+                                  <span className="text-foreground">{action}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {Array.isArray(tec.suggestions.longTermActions) && tec.suggestions.longTermActions.length > 0 && (
+                          <div className="border border-emerald-500/30 rounded-lg p-3 bg-emerald-500/5 space-y-2">
+                            <span className="text-[9px] text-emerald-400 font-mono uppercase font-bold">LONG-TERM ACTIONS</span>
+                            <ul className="space-y-1.5">
+                              {tec.suggestions.longTermActions.map((action: string, i: number) => (
+                                <li key={i} className="text-xs flex items-start gap-1.5">
+                                  <span className="text-emerald-400 font-bold shrink-0">→</span>
+                                  <span className="text-foreground">{action}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Response Time Analysis */}
+                  {tec.eventCorrelation?.responseTimeAnalysis && (
+                    <div className="border border-border/50 rounded-xl overflow-hidden">
+                      <div className="bg-secondary/25 border-b border-border/40 p-3">
+                        <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// RESPONSE TIME ANALYSIS</p>
+                      </div>
+                      <div className="p-4 space-y-2">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          {([
+                            { label: "DETECTION", value: tec.eventCorrelation.responseTimeAnalysis.detectionTime },
+                            { label: "ACKNOWLEDGMENT", value: tec.eventCorrelation.responseTimeAnalysis.acknowledgmentTime },
+                            { label: "INTERVENTION", value: tec.eventCorrelation.responseTimeAnalysis.interventionTime },
+                            { label: "TOTAL RESPONSE", value: tec.eventCorrelation.responseTimeAnalysis.totalResponseTime },
+                          ] as {label: string; value: string | undefined}[]).filter((f) => f.value).map((f, i) => (
+                            <div key={i} className="bg-secondary/20 rounded p-2">
+                              <span className="text-[9px] text-muted-foreground font-mono uppercase">{f.label}</span>
+                              <p className="text-xs font-medium text-foreground mt-0.5">{f.value}</p>
+                            </div>
+                          ))}
+                        </div>
+                        {tec.eventCorrelation.responseTimeAnalysis.assessment && (
+                          <p className="text-xs text-muted-foreground italic">{tec.eventCorrelation.responseTimeAnalysis.assessment}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Standards Referenced */}
+                  {Array.isArray(tec.standardsReferenced) && tec.standardsReferenced.length > 0 && (
+                    <div className="border border-border/50 rounded-xl p-4">
+                      <span className="text-[9px] text-muted-foreground font-mono uppercase font-bold block mb-2">// STANDARDS REFERENCED</span>
+                      <div className="flex flex-wrap gap-2">
+                        {tec.standardsReferenced.map((std: string, i: number) => (
+                          <span key={i} className="text-[10px] font-mono bg-secondary/40 border border-border/40 rounded px-2 py-0.5 text-muted-foreground">{std}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             {showAddPhaseModal && (
               <div className="fixed inset-0 bg-background/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -4241,206 +4777,517 @@ function CasePage() {
       }
 
        case "report": {
-        const defaultActions = [
-          { id: "capa-1", desc: "Check safety lock constraints and verify manual controls are overridden.", owner: "Jane Doe (Maint)", date: "2026-05-25", status: "In Progress" },
-          { id: "capa-2", desc: "Establish periodic inspection intervals for sensor suites and safety valves.", owner: "John Smith (Ops)", date: "2026-06-01", status: "Pending" }
-        ];
-
-        // Normalize: handle both standard and rcaReport wrapper formats
-        let reportPayload: any = parsedData;
-        if (parsedData.rcaReport) {
+        // ── Normalize current report agent payload ──
+        let reportPayload: any = parsedData || {};
+        if (parsedData?.rcaReport) {
           reportPayload = { ...parsedData, ...parsedData.rcaReport };
-        } else if (parsedData.reportAnalysis) {
+        } else if (parsedData?.reportAnalysis) {
           reportPayload = { ...parsedData, ...parsedData.reportAnalysis };
         }
 
-        const initialActions = (reportPayload.correctiveActionsList && reportPayload.correctiveActionsList.length > 0)
-          ? reportPayload.correctiveActionsList
-          : defaultActions;
-
         const updateCapa = (id: string, key: string, val: any) => {
-          const next = capaActions.map(act => act.id === id ? { ...act, [key]: val } : act);
-          setCapaActions(next);
+          setCapaActions(capaActions.map(act => act.id === id ? { ...act, [key]: val } : act));
         };
-
         const addCapa = () => {
-          const nextId = `capa-${Date.now()}`;
-          const next = [...capaActions, { id: nextId, desc: "New CAPA details...", owner: "Operator", date: "2026-06-15", status: "Pending" }];
-          setCapaActions(next);
+          setCapaActions([...capaActions, { id: `capa-${Date.now()}`, desc: "New CAPA action...", owner: "Operator", dept: "", date: "2026-06-30", status: "Pending", type: "CA" }]);
         };
-
-        const deleteCapa = (id: string) => {
-          const next = capaActions.filter(act => act.id !== id);
-          setCapaActions(next);
-        };
-
+        const deleteCapa = (id: string) => setCapaActions(capaActions.filter(act => act.id !== id));
         const saveReport = () => {
-          const updatedPayload = {
-            ...reportPayload,
-            problemStatement: editProblemStatement,
-            rootCause: editRootCauseText,
-            correctiveActionsList: capaActions,
-            checklist: capaChecklist,
-            approved: reportApproved
-          };
-          updateAgentMsgMut.mutate(updatedPayload);
+          updateAgentMsgMut.mutate({ ...reportPayload, problemStatement: editProblemStatement, rootCause: editRootCauseText, correctiveActionsList: capaActions, checklist: capaChecklist, approved: reportApproved });
         };
+
+        // ── Combined data from all 7 prior agents ──
+        const cd = combinedQ.data;
+        const cLoading = combinedQ.isLoading;
+
+        const col = cd?.collector || {};
+        const fbRaw = cd?.fishbone || {};
+        const fbCats: Record<string, any[]> = fbRaw.fishbone || fbRaw.categories || {};
+        const ftRaw = cd?.faultTree || {};
+        const paRaw = cd?.pareto || {};
+        const paretoItems: Array<{mode:string;frequency:number}> = paRaw.paretoAnalysis?.byFailureMode || paRaw.byFailureMode || [];
+        const tlRaw = cd?.timeline || {};
+        const tlPhases: any[] = tlRaw.timeline?.phases || tlRaw.phases || [];
+        const eqRaw = cd?.equipment || {};
+        const rm = eqRaw.reliabilityMetrics || {};
+        const rpn = rm.rpnScores || eqRaw.rpnScores || {};
+        const rptRaw = cd?.report || {};
+        const rptCore = rptRaw.rcaReport || rptRaw;
+        const rcs: string[] = Array.isArray(rptCore.rootCauses) ? rptCore.rootCauses.filter(Boolean) : [rptRaw.rootCause || editRootCauseText || ""].filter(Boolean);
+        const capaFromReport: any[] = rptCore.actionPlan || rptRaw.correctiveActionsList || [];
+
+        // ── 5-Why from messages ──
+        const whyMsgs = (cd?.fiveWhyMessages || []).filter((m:any) => m.role === "assistant" && m.parsed);
+        const whySteps = whyMsgs.map((m:any) => m.parsed).filter((p:any) => p && (p.question || p.whyStep)).sort((a:any,b:any) => (a.whyStep||0)-(b.whyStep||0));
+        const whyStream1 = rptCore.whyWhyAnalysis?.stream1 || {};
+        const whyStream2 = rptCore.whyWhyAnalysis?.stream2 || {};
+
+        // ── FTA tree normalisation ──
+        let ftaTree: any = null;
+        if (ftRaw.tree?.id || ftRaw.tree?.label) ftaTree = ftRaw.tree;
+        else if (ftRaw.faultTreeAnalysis?.tree) ftaTree = ftRaw.faultTreeAnalysis.tree;
+        else if (ftRaw.faultTreeAnalysis) {
+          const fta = ftRaw.faultTreeAnalysis;
+          ftaTree = { id:"top", label: typeof fta.topEvent==="string" ? fta.topEvent : fta.topEvent?.label || "Failure Event", type:"gate", gateType:"OR", probability:1.0, children: Array.isArray(fta.branches)?fta.branches:[] };
+        } else if (ftRaw.topEvent || ftRaw.branches) {
+          ftaTree = { id:"top", label: ftRaw.topEvent||"Failure Event", type:"gate", gateType:"OR", probability:1.0, children: ftRaw.branches||[] };
+        }
+
+        // ── Recursive FTA renderer ──
+        const renderFtaTree = (node: any, depth = 0): React.ReactNode => {
+          if (!node) return null;
+          const isGate = node.type === "gate";
+          const prob = typeof node.probability === "number" ? `${(node.probability*100).toFixed(1)}%` : null;
+          const probColor = node.probability > 0.5 ? "text-red-400" : node.probability > 0.2 ? "text-amber-400" : "text-green-400";
+          return (
+            <div key={node.id || node.label} style={{marginLeft: depth*20}}>
+              <div className={`flex items-center gap-2 py-1 px-2 rounded my-0.5 ${isGate ? "bg-amber-950/30 border border-amber-500/20" : "bg-blue-950/20 border border-blue-500/10"}`}>
+                <span className={`text-[10px] font-mono ${isGate?"text-amber-400":"text-blue-400"}`}>{isGate?"◈":"◉"}</span>
+                <span className={`text-xs font-medium flex-1 ${isGate?"text-amber-100":"text-slate-300"}`}>{node.label}</span>
+                {isGate && node.gateType && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-amber-900/40 text-amber-400 rounded border border-amber-500/20">{node.gateType}</span>}
+                {prob && <span className={`text-[10px] font-mono font-bold ${probColor}`}>{prob}</span>}
+              </div>
+              {Array.isArray(node.children) && node.children.map((c:any) => renderFtaTree(c, depth+1))}
+            </div>
+          );
+        };
+
+        // ── Pareto cumulative calc ──
+        const paretoTotal = paretoItems.reduce((s,i)=>s+(i.frequency||0),0);
+        let cumFreq = 0;
+
+        const catColors: Record<string,string> = {
+          manpower:"#EF4444", machine:"#F59E0B", methods:"#8B5CF6", method:"#8B5CF6",
+          materials:"#10B981", material:"#10B981", measurements:"#06B6D4", measurement:"#06B6D4", environment:"#3B82F6"
+        };
+        const catLabels: Record<string,string> = {
+          manpower:"Skill / Man", machine:"Design / Machine", methods:"Method", method:"Method",
+          materials:"Material", material:"Material", measurements:"Measurement", measurement:"Measurement", environment:"Environment"
+        };
+
+        // ── Section header helper ──
+        const SH = ({num,title,color="text-primary"}:{num:number;title:string;color?:string}) => (
+          <div className="flex items-center gap-3 pb-2 mb-4 border-b border-border/60">
+            <span className="text-[10px] font-mono px-2 py-1 rounded bg-primary/10 text-primary border border-primary/20">STEP {num}</span>
+            <h4 className={`font-bold text-sm uppercase tracking-wide ${color}`}>{title}</h4>
+          </div>
+        );
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+
+            {/* ══ Top bar ══ */}
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Root Cause Analysis (RCA) Executive Report</h3>
+              <h3 className="font-bold text-base mono uppercase tracking-wide">// Full RCA Analysis — All 8 Steps</h3>
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => window.print()}>
-                  <FileText className="w-3.5 h-3.5 mr-1.5" /> Print/Export Report
-                </Button>
-                <Button size="sm" onClick={saveReport} disabled={updateAgentMsgMut.isPending}>
-                  {updateAgentMsgMut.isPending ? "Saving..." : "Save Report Details"}
+                <Button size="sm" onClick={saveReport} disabled={updateAgentMsgMut.isPending} variant="outline" className="h-7 text-xs">
+                  {updateAgentMsgMut.isPending ? "Saving..." : "Save Edits"}
                 </Button>
               </div>
             </div>
 
-            {/* Workflow approval State */}
-            <div className="bg-secondary/25 border border-border/50 rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-              <div>
-                <p className="text-xs font-semibold mono">// WORKFLOW APPROVAL STATE</p>
-                <div className="flex items-center gap-2 mt-1">
-                  <Badge className={reportApproved ? "bg-emerald-500/25 text-emerald-400 border-emerald-500/40" : "bg-amber-500/20 text-amber-400 border-amber-500/40"}>
-                    {reportApproved ? "APPROVED & SIGNED" : "DRAFT STATE"}
-                  </Badge>
-                  {reportApproved && <span className="text-[10px] text-muted-foreground font-mono">Approved by Operator on 2026-05-21</span>}
-                </div>
+            {/* ══ Download Panel ══ */}
+            <div className="bg-gradient-to-r from-blue-950/50 to-indigo-950/50 border border-blue-500/25 rounded-xl p-4">
+              <p className="text-[10px] font-bold mono text-blue-300 mb-3">// DOWNLOAD COMPLETE REPORT</p>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" className="bg-emerald-700 hover:bg-emerald-600 text-white gap-1.5 h-8"
+                  onClick={async()=>{ setReportDownloading("xlsx"); try{ const r=await downloadReportFn({data:{caseId,format:"xlsx"}}); if(!r?.base64) throw new Error("No data"); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Excel downloaded"); }catch(e:any){toast.error(e.message);} finally{setReportDownloading(null);} }}
+                  disabled={!!reportDownloading}>
+                  {reportDownloading==="xlsx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Excel (.xlsx)
+                </Button>
+                <Button size="sm" className="bg-blue-700 hover:bg-blue-600 text-white gap-1.5 h-8"
+                  onClick={async()=>{ setReportDownloading("docx"); try{ const r=await downloadReportFn({data:{caseId,format:"docx"}}); if(!r?.base64) throw new Error("No data"); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Word downloaded"); }catch(e:any){toast.error(e.message);} finally{setReportDownloading(null);} }}
+                  disabled={!!reportDownloading}>
+                  {reportDownloading==="docx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Word (.docx)
+                </Button>
+                <Button size="sm" variant="outline" className="gap-1.5 h-8" onClick={()=>window.print()}>
+                  <FileText className="w-3 h-3"/> Print / PDF
+                </Button>
+                <div className="h-8 w-px bg-border/60 mx-1"/>
+                <button onClick={async()=>{ setExportDownloading("html"); try{ const r=await exportFullAnalysisFn({data:{caseId,format:"html"}}); if(!r?.base64) throw new Error(); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full HTML exported"); }catch(e:any){toast.error("Export failed");} finally{setExportDownloading(null);} }}
+                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-emerald-950/60 text-emerald-400 hover:bg-emerald-900/60 border border-emerald-500/20 disabled:opacity-50">
+                  {exportDownloading==="html"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Full HTML
+                </button>
+                <button onClick={async()=>{ setExportDownloading("docx"); try{ const r=await exportFullAnalysisFn({data:{caseId,format:"docx"}}); if(!r?.base64) throw new Error(); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full Word exported"); }catch(e:any){toast.error("Export failed");} finally{setExportDownloading(null);} }}
+                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-blue-950/60 text-blue-400 hover:bg-blue-900/60 border border-blue-500/20 disabled:opacity-50">
+                  {exportDownloading==="docx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Full Word
+                </button>
               </div>
-              <Button
-                size="sm"
-                variant={reportApproved ? "outline" : "default"}
-                onClick={() => {
-                  const nextApproved = !reportApproved;
-                  setReportApproved(nextApproved);
-                  toast.success(nextApproved ? "Report Approved & Digitally Signed!" : "Report returned to draft state.");
-                }}
-              >
-                {reportApproved ? "Revoke Approval" : "Sign & Approve Report"}
+              <p className="text-[10px] text-blue-400/50 font-mono mt-2">Excel = RCA FORMAT template · Full HTML/Word = all 8 steps combined</p>
+            </div>
+
+            {/* ══ Approval State ══ */}
+            <div className="bg-secondary/25 border border-border/50 rounded-xl p-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+              <div className="flex items-center gap-3">
+                <Badge className={reportApproved?"bg-emerald-500/25 text-emerald-400 border-emerald-500/40":"bg-amber-500/20 text-amber-400 border-amber-500/40"}>
+                  {reportApproved?"APPROVED & SIGNED":"DRAFT STATE"}
+                </Badge>
+                <p className="text-[10px] font-mono text-muted-foreground">// WORKFLOW APPROVAL STATE</p>
+              </div>
+              <Button size="sm" variant={reportApproved?"outline":"default"}
+                onClick={()=>{ const n=!reportApproved; setReportApproved(n); toast.success(n?"Report Approved!":"Returned to draft."); }}>
+                {reportApproved?"Revoke Approval":"Sign & Approve Report"}
               </Button>
             </div>
 
-            <div className="bg-secondary/20 border border-border/50 rounded-xl p-5 space-y-4">
-              <div>
-                <label className="text-[10px] text-muted-foreground font-mono block">EXECUTIVE PROBLEM SUMMARY</label>
-                <input
-                  type="text"
-                  value={editProblemStatement}
-                  onChange={(e) => setEditProblemStatement(e.target.value)}
-                  className="w-full text-sm font-semibold p-2 mt-1 bg-background border border-border rounded text-foreground"
-                />
+            {/* ══════════════════════════════════════════════════════════ */}
+            {/* Loading skeleton while fetching combined data             */}
+            {/* ══════════════════════════════════════════════════════════ */}
+            {cLoading && (
+              <div className="flex items-center gap-3 p-4 bg-secondary/20 border border-border/40 rounded-xl">
+                <Loader2 className="w-4 h-4 animate-spin text-primary"/>
+                <span className="text-sm text-muted-foreground mono">Loading all analysis steps…</span>
               </div>
+            )}
 
-              <div>
-                <label className="text-[10px] text-muted-foreground font-mono block">CONFIRMED ROOT CAUSE</label>
-                <Textarea
-                  value={editRootCauseText}
-                  onChange={(e) => setEditRootCauseText(e.target.value)}
-                  className="w-full text-xs font-mono p-2 mt-1 bg-background border border-border rounded text-foreground"
-                  rows={2}
-                />
-              </div>
-            </div>
-
-            {/* CAPA Action Plan Tracker */}
-            <div className="bg-secondary/15 border border-border/40 rounded-xl p-4 space-y-4">
-              <div className="flex justify-between items-center">
-                <span className="text-xs font-bold uppercase tracking-wide text-primary mono">// CAPA ACTION ITEM TRACKER</span>
-                <Button size="sm" onClick={addCapa}>
-                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Action Item
-                </Button>
-              </div>
-
-              <div className="space-y-2">
-                {capaActions.map((act) => (
-                  <div key={act.id} className="p-3 border border-border/50 rounded-lg bg-background/50 text-xs space-y-2.5">
-                    <div className="flex justify-between gap-2">
-                      <input
-                        type="text"
-                        value={act.desc}
-                        onChange={(e) => updateCapa(act.id, "desc", e.target.value)}
-                        className="w-full bg-transparent border-0 p-0 text-xs font-semibold focus:ring-0 focus:outline-none text-foreground"
-                      />
-                      <button onClick={() => deleteCapa(act.id)} className="text-muted-foreground hover:text-red-500">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+            {/* ══ STEP 1 — DATA COLLECTION ══ */}
+            {cd && (col.problemStatement || col.equipmentName) && (
+              <div className="bg-secondary/15 border border-blue-500/20 rounded-xl p-5 space-y-4">
+                <SH num={1} title="Data Collection & Validation" color="text-blue-400"/>
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                  {[["Problem Statement",col.problemStatement],["Effect / Impact",col.effect],["Equipment Name",col.equipmentName],["Location / Unit",col.location],["Operating Conditions",col.operatingConditions],["Incident Timestamp",col.timestamp],["Witnessed Symptoms",col.witnessedSymptoms]].filter(([,v])=>v).map(([l,v])=>(
+                    <div key={l as string} className={`flex gap-2 ${l==="Problem Statement"||l==="Witnessed Symptoms"?"col-span-2":""}`}>
+                      <span className="text-muted-foreground font-mono shrink-0 min-w-[130px]">{l as string}:</span>
+                      <span className="text-foreground">{v as string}</span>
                     </div>
+                  ))}
+                </div>
+                {Array.isArray(col.gaps)&&col.gaps.length>0&&(
+                  <div>
+                    <p className="text-[10px] font-mono text-amber-400 mb-2">GAPS / UNRESOLVED QUESTIONS</p>
+                    <div className="flex flex-wrap gap-2">{col.gaps.map((g:string,i:number)=><span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-500/20">{g}</span>)}</div>
+                  </div>
+                )}
+                {Array.isArray(col.followUps)&&col.followUps.length>0&&(
+                  <div>
+                    <p className="text-[10px] font-mono text-blue-400 mb-2">SUGGESTED FOLLOW-UPS</p>
+                    <div className="flex flex-wrap gap-2">{col.followUps.map((f:string,i:number)=><span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-blue-950/40 text-blue-300 border border-blue-500/20">{f}</span>)}</div>
+                  </div>
+                )}
+              </div>
+            )}
 
-                    <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/20 text-[9px] mono">
-                      <div>
-                        <span>Owner:</span>
-                        <input
-                          type="text"
-                          value={act.owner}
-                          onChange={(e) => updateCapa(act.id, "owner", e.target.value)}
-                          className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground"
-                        />
+            {/* ══ STEP 2 — 5-WHY ══ */}
+            {cd && (whySteps.length>0 || Object.values(whyStream1).some(Boolean)) && (
+              <div className="bg-secondary/15 border border-amber-500/20 rounded-xl p-5 space-y-4">
+                <SH num={2} title="5-Why Root Cause Analysis" color="text-amber-400"/>
+                {(rptCore.whyWhyAnalysis?.problem||whySteps[0]?.problemStatement) && (
+                  <div className="bg-amber-950/20 border border-amber-500/15 rounded-lg px-4 py-3">
+                    <span className="text-[10px] font-mono text-amber-400 mr-2">PROBLEM:</span>
+                    <span className="text-sm font-semibold">{rptCore.whyWhyAnalysis?.problem||whySteps[0]?.problemStatement}</span>
+                  </div>
+                )}
+                {Object.values(whyStream1).some(Boolean) ? (
+                  <div className="grid grid-cols-2 gap-6">
+                    {([["Stream 1 — Primary Chain",whyStream1,"amber"],["Stream 2 — Contributing Chain",whyStream2,"violet"]] as const).map(([label,stream,col])=>{
+                      const entries = Object.entries(stream as Record<string,string>).filter(([,v])=>v);
+                      if(!entries.length) return null;
+                      return (
+                        <div key={label as string}>
+                          <p className="text-[10px] font-mono text-muted-foreground mb-2">{label as string}</p>
+                          <div className="space-y-0">
+                            {entries.map(([k,v],i)=>(
+                              <div key={k}>
+                                <div className="flex gap-0">
+                                  <div className={`text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0`}>{k.replace("why","WHY ")}</div>
+                                  <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">{v}</div>
+                                </div>
+                                {i<entries.length-1&&<div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="space-y-0">
+                    {whySteps.map((step:any,i:number)=>(
+                      <div key={i}>
+                        <div className="flex gap-0">
+                          <div className="text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0">WHY {step.whyStep||i+1}</div>
+                          <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">
+                            {step.question&&<div className="font-semibold mb-1">{step.question}</div>}
+                            {(step.selectedAnswer||step.operatorInstruction)&&<div className="text-muted-foreground">↳ {step.selectedAnswer||step.operatorInstruction}</div>}
+                          </div>
+                        </div>
+                        {i<whySteps.length-1&&<div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
                       </div>
-                      <div>
-                        <span>Due Date:</span>
-                        <input
-                          type="text"
-                          value={act.date}
-                          onChange={(e) => updateCapa(act.id, "date", e.target.value)}
-                          className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground"
-                        />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ══ STEP 3 — FISHBONE ══ */}
+            {cd && Object.keys(fbCats).some(k=>Array.isArray(fbCats[k])&&fbCats[k].length) && (
+              <div className="bg-secondary/15 border border-violet-500/20 rounded-xl p-5 space-y-4">
+                <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-violet-400"/>
+                <div className="grid grid-cols-3 gap-3">
+                  {Object.entries(fbCats).filter(([,v])=>Array.isArray(v)&&v.length).map(([key,causes])=>{
+                    const color = catColors[key]||"#64748B";
+                    const label = catLabels[key]||key;
+                    return (
+                      <div key={key} className="bg-background/40 border border-border/30 rounded-lg p-3" style={{borderTop:`3px solid ${color}`}}>
+                        <p className="text-[10px] font-mono font-bold mb-2" style={{color}}>{label}</p>
+                        <ul className="space-y-1.5">
+                          {(causes as any[]).map((c:any,ci:number)=>{
+                            const name = typeof c==="string"?c:c.cause||"";
+                            const subs: string[] = typeof c==="object"?(c.subCauses||[]):[];
+                            return (
+                              <li key={ci} className="text-xs pl-2 border-l-2" style={{borderColor:color+"66"}}>
+                                {name}
+                                {subs.map((s,si)=><div key={si} className="text-[10px] text-muted-foreground pl-2">↳ {s}</div>)}
+                              </li>
+                            );
+                          })}
+                        </ul>
                       </div>
-                      <div>
-                        <span>Status:</span>
-                        <select
-                          value={act.status}
-                          onChange={(e) => updateCapa(act.id, "status", e.target.value)}
-                          className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]"
-                        >
-                          <option value="Pending">Pending</option>
-                          <option value="In Progress">In Progress</option>
-                          <option value="Completed">Completed</option>
-                        </select>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 4 — FTA ══ */}
+            {cd && ftaTree && (
+              <div className="bg-secondary/15 border border-emerald-500/20 rounded-xl p-5 space-y-4">
+                <SH num={4} title="Fault Tree Analysis (FTA)" color="text-emerald-400"/>
+                <div className="bg-background/40 border border-border/30 rounded-lg p-4 font-mono text-xs overflow-x-auto">
+                  {renderFtaTree(ftaTree)}
+                </div>
+                <div className="flex gap-4 text-[10px] font-mono text-muted-foreground">
+                  <span><span className="text-amber-400">◈</span> Gate (AND/OR/NOT)</span>
+                  <span><span className="text-blue-400">◉</span> Basic event</span>
+                  <span><span className="text-red-400">%</span> &gt;50% = high risk</span>
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 5 — PARETO ══ */}
+            {cd && paretoItems.length>0 && (
+              <div className="bg-secondary/15 border border-cyan-500/20 rounded-xl p-5 space-y-4">
+                <SH num={5} title="Pareto Analysis" color="text-cyan-400"/>
+                <div className="space-y-1">
+                  <div className="flex gap-3 text-[9px] font-mono text-muted-foreground pb-1 border-b border-border/40">
+                    <span className="w-52">Failure Mode</span>
+                    <span className="flex-1">Frequency</span>
+                    <span className="w-10 text-right">Freq</span>
+                    <span className="w-14 text-right">Cum %</span>
+                  </div>
+                  {paretoItems.map((item,idx)=>{
+                    cumFreq += item.frequency||0;
+                    const cumPct = paretoTotal>0?(cumFreq/paretoTotal)*100:0;
+                    const barPct = paretoTotal>0?Math.round((item.frequency/paretoItems[0].frequency)*100):0;
+                    const barColor = cumPct<=80?"bg-cyan-500":"bg-slate-600";
+                    return (
+                      <div key={idx} className="flex items-center gap-3 py-1.5 border-b border-border/20">
+                        <span className="w-52 text-xs truncate">{item.mode}</span>
+                        <div className="flex-1 h-4 bg-background/60 rounded overflow-hidden">
+                          <div className={`h-full rounded ${barColor}`} style={{width:`${barPct}%`}}/>
+                        </div>
+                        <span className="w-10 text-right text-xs font-mono">{item.frequency}</span>
+                        <span className={`w-14 text-right text-xs font-mono ${cumPct<=80?"text-cyan-400":"text-muted-foreground"}`}>{cumPct.toFixed(0)}%</span>
                       </div>
+                    );
+                  })}
+                </div>
+                <div className="flex gap-4 text-[10px] font-mono">
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-cyan-500 inline-block"/>≤80% cumulative</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-slate-600 inline-block"/>Remaining</span>
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 6 — TIMELINE ══ */}
+            {cd && tlPhases.length>0 && (
+              <div className="bg-secondary/15 border border-orange-500/20 rounded-xl p-5 space-y-3">
+                <SH num={6} title="Incident Timeline" color="text-orange-400"/>
+                <div className="space-y-0">
+                  {tlPhases.map((phase:any,idx:number)=>{
+                    const phaseColors=["border-blue-500","border-violet-500","border-amber-500","border-emerald-500","border-red-500","border-cyan-500"];
+                    const textColors=["text-blue-400","text-violet-400","text-amber-400","text-emerald-400","text-red-400","text-cyan-400"];
+                    const col = phaseColors[idx%phaseColors.length];
+                    const tc = textColors[idx%textColors.length];
+                    return (
+                      <div key={idx} className={`border-l-4 ${col} pl-4 pb-4 pt-1 ${idx>0?"mt-0":""}`}>
+                        <div className="flex items-center gap-3 mb-1">
+                          <span className={`font-bold text-sm ${tc}`}>{phase.phase}</span>
+                          <span className="text-[10px] font-mono text-muted-foreground bg-secondary/50 px-2 py-0.5 rounded-full">{phase.start} · {phase.duration}</span>
+                        </div>
+                        {phase.description&&<p className="text-xs text-muted-foreground mb-2">{phase.description}</p>}
+                        <ul className="space-y-1">
+                          {(Array.isArray(phase.events)?phase.events:[]).map((ev:string,ei:number)=>(
+                            <li key={ei} className="text-xs px-3 py-1.5 bg-background/40 rounded border border-border/20 flex gap-2">
+                              <span className="text-muted-foreground">›</span>{ev}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 7 — EQUIPMENT ══ */}
+            {cd && (rm.mtbf||rm.mttr||Object.keys(rpn).length>0) && (
+              <div className="bg-secondary/15 border border-pink-500/20 rounded-xl p-5 space-y-4">
+                <SH num={7} title="Equipment Reliability & RPN Analysis" color="text-pink-400"/>
+                {(rm.mtbf||rm.mttr||rm.availability||rm.failureRate)&&(
+                  <div className="grid grid-cols-4 gap-3">
+                    {([["MTBF",rm.mtbf,"#60A5FA"],["MTTR",rm.mttr,"#A78BFA"],["Availability",rm.availability,"#34D399"],["Failure Rate",rm.failureRate,"#F87171"]] as const).filter(([,v])=>v).map(([label,metric,color])=>(
+                      <div key={label as string} className="bg-background/50 border border-border/30 rounded-xl p-4 text-center" style={{borderTop:`3px solid ${color}`}}>
+                        <p className="text-[9px] font-mono text-muted-foreground mb-2">{label as string}</p>
+                        <p className="text-lg font-bold" style={{color:color as string}}>{(metric as any)?.value||"—"}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">{(metric as any)?.trend||""}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {Object.keys(rpn).length>0&&(
+                  <div>
+                    <p className="text-[10px] font-mono text-muted-foreground mb-2">RPN SCORES (Risk Priority Number, 1–100)</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      {Object.entries(rpn).map(([k,v])=>{
+                        const score = Number(v)||0;
+                        const rColor = score>=70?"#EF4444":score>=40?"#F59E0B":"#22C55E";
+                        return (
+                          <div key={k} className="bg-background/50 border border-border/30 rounded-lg p-3">
+                            <p className="text-[10px] font-mono text-muted-foreground capitalize mb-2">{k}</p>
+                            <div className="h-2 bg-secondary/40 rounded-full mb-1.5 overflow-hidden">
+                              <div className="h-full rounded-full" style={{width:`${score}%`,background:rColor}}/>
+                            </div>
+                            <p className="text-xl font-bold" style={{color:rColor}}>{score}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ══ STEP 8 — ROOT CAUSES & CAPA ══ */}
+            <div className="bg-red-950/20 border border-red-500/25 rounded-xl p-5 space-y-4">
+              <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-400"/>
+
+              {/* Editable problem + root cause */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] text-muted-foreground font-mono block mb-1">PROBLEM STATEMENT</label>
+                  <input type="text" value={editProblemStatement} onChange={e=>setEditProblemStatement(e.target.value)}
+                    className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground"/>
+                </div>
+                <div>
+                  <label className="text-[10px] text-muted-foreground font-mono block mb-1">CONFIRMED ROOT CAUSE</label>
+                  <Textarea value={editRootCauseText} onChange={e=>setEditRootCauseText(e.target.value)} autoResize
+                    className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground"/>
+                </div>
+              </div>
+
+              {/* Root causes from report agent */}
+              {rcs.filter(rc=>rc&&rc!==editRootCauseText).length>0&&(
+                <div className="space-y-2">
+                  <p className="text-[10px] font-mono text-red-400">IDENTIFIED ROOT CAUSES</p>
+                  {rcs.map((rc,i)=>(
+                    <div key={i} className="flex gap-2 text-xs p-2 bg-red-950/20 border border-red-500/15 rounded">
+                      <span className="text-red-400 font-bold shrink-0">{i+1}.</span>
+                      <span>{rc}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Report header fields */}
+              {(rptCore.header?.rcaNumber||rptCore.equipment?.name)&&(
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
+                  {[["RCA No.",rptCore.header?.rcaNumber],["Plant",rptCore.header?.plant],["Department",rptCore.header?.department],["Section",rptCore.header?.section],["Equipment",rptCore.equipment?.name],["Occurrence",rptCore.equipment?.occurrenceDateTime],["Restoration",rptCore.equipment?.restorationDateTime],["Prod. Affected",rptCore.equipment?.productionAffectedHours]].filter(([,v])=>v).map(([l,v])=>(
+                    <div key={l as string} className="flex gap-2">
+                      <span className="text-muted-foreground font-mono shrink-0 w-28">{l as string}:</span>
+                      <span className="text-foreground font-medium">{v as string}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Cost of failure */}
+              {rptCore.costOfFailure&&(
+                <div>
+                  <p className="text-[10px] font-mono text-muted-foreground mb-2">COST OF FAILURE</p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {[["Spare Parts",rptCore.costOfFailure.sparePartCost],["Service",rptCore.costOfFailure.serviceCost],["Manpower",rptCore.costOfFailure.manpowerCost],["Prod. Loss",rptCore.costOfFailure.productionLoss]].map(([l,v])=>(
+                      <div key={l as string} className="bg-background/50 border border-border/30 rounded-lg p-2 text-center">
+                        <p className="text-[9px] font-mono text-muted-foreground">{l as string} (Lacs)</p>
+                        <p className="text-base font-bold mt-0.5">{v??0}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* CAPA Tracker */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] font-mono text-primary font-bold">CAPA ACTION ITEM TRACKER</span>
+                  <Button size="sm" onClick={addCapa} className="h-7 text-xs"><Plus className="w-3 h-3 mr-1"/>Add</Button>
+                </div>
+                {capaActions.map(act=>(
+                  <div key={act.id} className="p-3 border border-border/50 rounded-lg bg-background/50 text-xs space-y-2">
+                    <div className="flex gap-2">
+                      <input type="text" value={act.desc} onChange={e=>updateCapa(act.id,"desc",e.target.value)}
+                        className="flex-1 bg-transparent border-0 p-0 text-xs font-semibold focus:ring-0 focus:outline-none text-foreground"/>
+                      <button onClick={()=>deleteCapa(act.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
+                    </div>
+                    <div className="grid grid-cols-5 gap-2 pt-1.5 border-t border-border/20 text-[9px] mono">
+                      {[["Type","type","CA|PA",act.type||"CA"],["Owner","owner","text",act.owner],["Dept","dept","text",act.dept||""],["Due","date","text",act.date],["Status","status","Pending|In Progress|Completed",act.status]].map(([lbl,field,opts,val])=>(
+                        <div key={field as string}>
+                          <span className="text-muted-foreground">{lbl as string}:</span>
+                          {(opts as string).includes("|")?(
+                            <select value={val as string} onChange={e=>updateCapa(act.id,field as string,e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
+                              {(opts as string).split("|").map(o=><option key={o} value={o}>{o}</option>)}
+                            </select>
+                          ):(
+                            <input type="text" value={val as string} onChange={e=>updateCapa(act.id,field as string,e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground"/>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
                 ))}
               </div>
+
+              {/* Deployment */}
+              {(rptCore.horizontalDeployment||rptCore.preventiveMeasures)&&(
+                <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs pt-2 border-t border-border/30">
+                  {[["Horizontal Deployment",rptCore.horizontalDeployment],["Preventive Measures",rptCore.preventiveMeasures],["Sustainable Measures (SOP/SMP)",rptCore.sustainableMeasures],["FMEA Update Needed?",rptCore.changesRequiredInFMEA]].filter(([,v])=>v).map(([l,v])=>(
+                    <div key={l as string} className="flex gap-2 col-span-2">
+                      <span className="text-muted-foreground font-mono shrink-0 w-48">{l as string}:</span>
+                      <span className="text-foreground">{v as string}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {/* Validation Checklist */}
-            <div className="bg-secondary/15 border border-border/40 rounded-xl p-5 space-y-3">
-              <span className="text-xs text-primary font-bold mono block">// CAPA VALIDATION & QUALITY AUDIT CHECKLIST</span>
-              <div className="space-y-2 text-xs">
-                {[
-                  { key: "rootCauseMapped", label: "Root cause verified and mapped to physical evidence logs" },
-                  { key: "capaFeasible", label: "CAPA actions are immediately feasible and budget-allocated" },
-                  { key: "redundancyMet", label: "Preventive actions build redundancy to prevent multi-point failure recurrence" }
-                ].map((chk) => (
-                  <div key={chk.key} className="flex items-start gap-2.5 p-2 rounded bg-background/30 hover:bg-background/50 transition-colors">
-                    <input
-                      type="checkbox"
-                      id={`chk-${chk.key}`}
-                      checked={!!capaChecklist[chk.key]}
-                      onChange={(e) => {
-                        setCapaChecklist({ ...capaChecklist, [chk.key]: e.target.checked });
-                      }}
-                      className="rounded border-border bg-background text-primary mt-0.5"
-                    />
-                    <label htmlFor={`chk-${chk.key}`} className="cursor-pointer select-none leading-relaxed text-muted-foreground">
-                      {chk.label}
-                    </label>
-                  </div>
-                ))}
-              </div>
+            {/* ══ CAPA Validation Checklist ══ */}
+            <div className="bg-secondary/15 border border-border/40 rounded-xl p-4 space-y-3">
+              <span className="text-[10px] text-primary font-bold mono block">// CAPA VALIDATION & QUALITY AUDIT CHECKLIST</span>
+              {[{key:"rootCauseMapped",label:"Root cause verified and mapped to physical evidence logs"},{key:"capaFeasible",label:"CAPA actions are immediately feasible and budget-allocated"},{key:"redundancyMet",label:"Preventive actions build redundancy to prevent multi-point failure recurrence"}].map(chk=>(
+                <div key={chk.key} className="flex items-start gap-2.5 p-2 rounded bg-background/30 hover:bg-background/50 transition-colors">
+                  <input type="checkbox" id={`chk-${chk.key}`} checked={!!capaChecklist[chk.key]} onChange={e=>setCapaChecklist({...capaChecklist,[chk.key]:e.target.checked})} className="rounded border-border bg-background text-primary mt-0.5"/>
+                  <label htmlFor={`chk-${chk.key}`} className="cursor-pointer text-xs select-none leading-relaxed text-muted-foreground">{chk.label}</label>
+                </div>
+              ))}
             </div>
 
-            {/* Report Iterative Q&A */}
+            {/* ══ Iterative Chat ══ */}
             <div className="border border-border/50 rounded-xl overflow-hidden">
               <div className="bg-secondary/25 border-b border-border/40 p-3 flex items-center justify-between">
                 <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// REFINE REPORT & CAPA</p>
-                <span className="text-[10px] text-muted-foreground font-mono">Ask to add CAPA items, update root cause, or generate executive summary text</span>
+                <span className="text-[10px] text-muted-foreground font-mono">Add CAPA items, update root cause, or generate summary</span>
               </div>
-              {renderIterativePanel("e.g. \"Generate an executive summary of the root cause\", or \"Add a CAPA for replacing the temperature probe on a 90-day cycle\"...")}
+              {renderIterativePanel("e.g. \"Add a CAPA for seal replacement on a 90-day cycle\" or \"Summarise the root cause in one sentence\"...")}
             </div>
           </div>
         );
@@ -4853,6 +5700,57 @@ function CasePage() {
                   )}
                   Run Analysis
                 </Button>
+
+                {/* Export All button — downloads HTML or DOCX of all 8 steps */}
+                <div className="flex items-center gap-1 border border-border/60 rounded-lg overflow-hidden">
+                  <button
+                    onClick={async () => {
+                      setExportDownloading("html");
+                      try {
+                        const result = await exportFullAnalysisFn({ data: { caseId, format: "html" } });
+                        if (!result?.base64) throw new Error("No file returned");
+                        const bytes = Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0));
+                        const blob = new Blob([bytes], { type: result.mimeType });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url; a.download = result.filename; a.click();
+                        URL.revokeObjectURL(url);
+                        toast.success("Full analysis exported as HTML");
+                      } catch (e: any) { toast.error(e.message || "Export failed"); }
+                      finally { setExportDownloading(null); }
+                    }}
+                    disabled={!!exportDownloading}
+                    className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 bg-emerald-950/60 text-emerald-400 hover:bg-emerald-900/60 border-r border-border/60 transition-colors disabled:opacity-50"
+                    title="Export all 8 steps as HTML"
+                  >
+                    {exportDownloading === "html" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
+                    HTML
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setExportDownloading("docx");
+                      try {
+                        const result = await exportFullAnalysisFn({ data: { caseId, format: "docx" } });
+                        if (!result?.base64) throw new Error("No file returned");
+                        const bytes = Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0));
+                        const blob = new Blob([bytes], { type: result.mimeType });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url; a.download = result.filename; a.click();
+                        URL.revokeObjectURL(url);
+                        toast.success("Full analysis exported as Word");
+                      } catch (e: any) { toast.error(e.message || "Export failed"); }
+                      finally { setExportDownloading(null); }
+                    }}
+                    disabled={!!exportDownloading}
+                    className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 bg-blue-950/60 text-blue-400 hover:bg-blue-900/60 transition-colors disabled:opacity-50"
+                    title="Export all 8 steps as Word"
+                  >
+                    {exportDownloading === "docx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
+                    Word
+                  </button>
+                </div>
+
                 <Button
                   variant={showChat ? "secondary" : "outline"}
                   size="sm"
@@ -4967,14 +5865,29 @@ function CasePage() {
                           <div className="flex gap-1.5 mb-2 flex-wrap">
                             {attachmentsData.map((a: any, idx: number) => (
                               <div key={idx} className="relative group">
-                                <img
-                                  src={`data:${a.contentType};base64,${a.data}`}
-                                  alt={a.filename}
-                                  className="w-14 h-14 object-cover rounded-lg border border-border cursor-pointer"
-                                  onClick={() =>
-                                    window.open(`data:${a.contentType};base64,${a.data}`, "_blank")
-                                  }
-                                />
+                                {a.contentType?.startsWith("image/") ? (
+                                  <img
+                                    src={`data:${a.contentType};base64,${a.data}`}
+                                    alt={a.filename}
+                                    className="w-14 h-14 object-cover rounded-lg border border-border cursor-pointer"
+                                    onClick={() =>
+                                      window.open(`data:${a.contentType};base64,${a.data}`, "_blank")
+                                    }
+                                  />
+                                ) : (
+                                  <div
+                                    className="w-14 h-14 flex flex-col items-center justify-center rounded-lg border border-border bg-secondary/60 cursor-pointer hover:bg-secondary transition-colors gap-0.5 px-1"
+                                    onClick={() =>
+                                      window.open(`data:${a.contentType};base64,${a.data}`, "_blank")
+                                    }
+                                    title={a.filename}
+                                  >
+                                    <FileText className="w-5 h-5 text-primary shrink-0" />
+                                    <span className="text-[8px] text-muted-foreground font-mono text-center leading-tight line-clamp-2 break-all">
+                                      {a.filename}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -4982,7 +5895,7 @@ function CasePage() {
 
                         {m.role === "user"
                           ? renderMessageContent(m.content, m.role)
-                          : renderMessageContent(m.content, m.role)}
+                          : renderMessageContent(m.content, m.role, true)}
                       </div>
                     </div>
                   );
@@ -5037,11 +5950,20 @@ function CasePage() {
                   <div className="flex gap-2 overflow-x-auto pb-1">
                     {attachmentsPreview.map((preview, idx) => (
                       <div key={idx} className="relative shrink-0">
-                        <img
-                          src={preview}
-                          alt=""
-                          className="w-12 h-12 object-cover rounded-md border border-border"
-                        />
+                        {attachments[idx]?.contentType?.startsWith("image/") ? (
+                          <img
+                            src={preview}
+                            alt=""
+                            className="w-12 h-12 object-cover rounded-md border border-border"
+                          />
+                        ) : (
+                          <div className="w-12 h-12 flex flex-col items-center justify-center rounded-md border border-border bg-secondary/60 gap-0.5 px-1" title={attachments[idx]?.filename}>
+                            <FileText className="w-4 h-4 text-primary shrink-0" />
+                            <span className="text-[7px] text-muted-foreground font-mono text-center leading-tight line-clamp-2 break-all">
+                              {attachments[idx]?.filename}
+                            </span>
+                          </div>
+                        )}
                         <button
                           onClick={() => removeAttachment(idx)}
                           className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-destructive text-white flex items-center justify-center text-[10px] leading-none"
