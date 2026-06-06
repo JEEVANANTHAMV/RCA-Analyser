@@ -8,6 +8,15 @@
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
+  --text-xs: 0.85rem;
+  --text-sm: 0.95rem;
+  --text-base: 1.05rem;
+  --text-lg: 1.15rem;
+  --text-xl: 1.3rem;
+  --text-2xl: 1.6rem;
+  --text-3xl: 2rem;
+  --text-4xl: 2.5rem;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -266,7 +275,7 @@
     border-bottom: 1px solid var(--color-border);
     font-family: var(--font-mono);
     text-transform: uppercase;
-    font-size: 0.7rem;
+    font-size: 0.85rem;
     letter-spacing: 0.12em;
     color: var(--color-muted-foreground);
   }
@@ -276,4 +285,15 @@
     border-radius: 50%;
     box-shadow: 0 0 8px currentColor;
   }
+}
+
+/* Global scale overrides for arbitrary small font sizes */
+.text-\[9px\], .text-\[9px\] * {
+  font-size: 0.75rem !important; /* ~12px */
+}
+.text-\[10px\], .text-\[10px\] * {
+  font-size: 0.825rem !important; /* ~13.2px */
+}
+.text-\[11px\], .text-\[11px\] * {
+  font-size: 0.875rem !important; /* ~14px */
 }

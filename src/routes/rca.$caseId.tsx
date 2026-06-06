@@ -277,6 +277,7 @@ function CasePage() {
   });
   const [editRootCauseText, setEditRootCauseText] = useState("");
   const [streamingChatText, setStreamingChatText] = useState<string | null>(null);
+  const [agentParsedData, setAgentParsedData] = useState<Record<string, any>>({});
   const [selectedCauseId, setSelectedCauseId] = useState<string>("");
   const [customCauseText, setCustomCauseText] = useState<string>("");
   const [isDirty, setIsDirty] = useState(false);
@@ -672,22 +673,56 @@ function CasePage() {
     .filter((m: any) => m.role === "assistant")
     .slice(-1)[0];
 
-  let parsedData: any = null;
-  let isStreaming = false;
+  // Persistent JSON streaming parsing state to prevent UI disappearing/flickering
+  useEffect(() => {
+    if (!currentAgent) return;
+    let nextParsed: any = null;
+    if (streamingText !== null) {
+      nextParsed = parseMaybeJson(streamingText);
+    } else if (latestAssistantMsg) {
+      nextParsed = parseMaybeJson(latestAssistantMsg.content);
+      if (!nextParsed && latestAssistantMsg.raw_response) {
+        try {
+          nextParsed = typeof latestAssistantMsg.raw_response === "string"
+            ? parseMaybeJson(latestAssistantMsg.raw_response)
+            : latestAssistantMsg.raw_response;
+        } catch {}
+      }
+    }
 
-  if (streamingText !== null) {
-    isStreaming = true;
-    parsedData = parseMaybeJson(streamingText);
+    if (nextParsed && typeof nextParsed === "object") {
+      setAgentParsedData((prev) => {
+        const current = prev[currentAgent.key];
+        if (JSON.stringify(current) === JSON.stringify(nextParsed)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [currentAgent.key]: nextParsed,
+        };
+      });
+    }
+  }, [streamingText, latestAssistantMsg, currentAgent?.key]);
+
+  // Derive current parsed data with state lookup and immediate parse fallback
+  let immediateParsed: any = null;
+  const isStreaming = streamingText !== null;
+  if (isStreaming) {
+    immediateParsed = parseMaybeJson(streamingText);
   } else if (latestAssistantMsg) {
-    parsedData = parseMaybeJson(latestAssistantMsg.content);
-    if (!parsedData && latestAssistantMsg.raw_response) {
+    immediateParsed = parseMaybeJson(latestAssistantMsg.content);
+    if (!immediateParsed && latestAssistantMsg.raw_response) {
       try {
-        parsedData = typeof latestAssistantMsg.raw_response === "string"
+        immediateParsed = typeof latestAssistantMsg.raw_response === "string"
           ? parseMaybeJson(latestAssistantMsg.raw_response)
           : latestAssistantMsg.raw_response;
       } catch {}
     }
   }
+
+  const parsedData = currentAgent
+    ? (agentParsedData[currentAgent.key] || (immediateParsed && typeof immediateParsed === "object" ? immediateParsed : null))
+    : null;
 
   // Auto scroll 5 Why investigation workspace when new questions stream or are added
   const stepsCount = messages.filter((m: any) => m.role === "assistant").length;
@@ -1052,6 +1087,17 @@ function CasePage() {
       if (parsed && typeof parsed === "object") {
         return <AgentResponseRenderer data={parsed} />;
       }
+      
+      // If it looks like JSON but hasn't parsed successfully yet (e.g. streaming), show a premium loading indicator
+      const trimmed = content.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        return (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono italic p-1 animate-pulse">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-primary shrink-0" />
+            Synthesizing workspace UI components...
+          </div>
+        );
+      }
       return <div className="text-sm whitespace-pre-wrap">{content}</div>;
     }
     return <div className="text-sm whitespace-pre-wrap">{content}</div>;
@@ -1089,7 +1135,9 @@ function CasePage() {
               <span className="text-[10px] text-primary font-mono font-bold">{currentAgent?.shortName} responding...</span>
             </div>
             {streamingChatText && (
-              <p className="text-xs text-muted-foreground whitespace-pre-wrap font-mono">{streamingChatText}</p>
+              <div className="mt-2 border-t border-border/20 pt-2">
+                {renderMessageContent(streamingChatText, "assistant")}
+              </div>
             )}
           </div>
         )}
@@ -5058,9 +5106,9 @@ function CasePage() {
 function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
   if (!data || typeof data !== "object") {
     return (
-      <pre className="whitespace-pre-wrap">
-        {typeof data === "string" ? data : JSON.stringify(data)}
-      </pre>
+      <div className="text-sm whitespace-pre-wrap font-mono">
+        {typeof data === "string" ? data : ""}
+      </div>
     );
   }
 
@@ -5332,9 +5380,13 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
         !data.reliabilityMetrics &&
         !data.paretoAnalysis &&
         !data.timeline) ? (
-        <pre className="bg-secondary/50 rounded-lg p-3 text-xs overflow-auto max-h-96 whitespace-pre-wrap font-mono">
-          {JSON.stringify(data, null, 2)}
-        </pre>
+        <div className="bg-secondary/35 border border-border/40 rounded p-3 text-xs mono text-muted-foreground">
+          <div className="flex items-center gap-1.5 text-primary mb-1 font-semibold">
+            <Zap className="w-3.5 h-3.5" />
+            <span>ANALYSIS COMPILED</span>
+          </div>
+          Workspace updated with {keys.length} parameters. Focus on the main visual console.
+        </div>
       ) : null}
     </div>
   );
