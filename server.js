@@ -8,7 +8,11 @@ const __dirname = dirname(__filename);
 const distServer = join(__dirname, "dist", "server");
 const distClient = join(__dirname, "dist", "client");
 
-const { default: worker } = await import(join(distServer, "index.js"));
+const indexPath = join(distServer, "index.js");
+const serverPath = join(distServer, "server.js");
+const workerEntry = existsSync(indexPath) ? indexPath : serverPath;
+
+const { default: worker } = await import(workerEntry);
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -105,7 +109,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
 });
