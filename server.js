@@ -2,7 +2,6 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, parse } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createReadableStreamFromReadable } from "node:stream/web";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,6 +42,20 @@ function staticHandler(pathname) {
     headers: { "content-type": contentType },
     body: readFileSync(filePath),
   };
+}
+
+async function pipeWebStreamToNode(responseBody, nodeRes) {
+  const reader = responseBody.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      nodeRes.write(value);
+    }
+    nodeRes.end();
+  } catch (e) {
+    nodeRes.end();
+  }
 }
 
 const server = createServer(async (req, res) => {
@@ -86,22 +99,7 @@ const server = createServer(async (req, res) => {
   res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
 
   if (response.body) {
-    const stream = createReadableStreamFromReadable(response.body);
-    await new Promise((resolve, reject) => {
-      const reader = stream.getReader();
-      function push() {
-        reader.read().then(({ done, value }) => {
-          if (done) {
-            res.end();
-            resolve();
-            return;
-          }
-          res.write(value);
-          push();
-        }).catch(reject);
-      }
-      push();
-    });
+    await pipeWebStreamToNode(response.body, res);
   } else {
     res.end();
   }
