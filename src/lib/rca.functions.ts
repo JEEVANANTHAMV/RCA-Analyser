@@ -1748,16 +1748,37 @@ export const runFullAutomation = createServerFn({ method: "POST" })
 
             let responseText = await callAgentApiRaw(agentKey as AgentKey, prompt, chatId, emitToken);
             emit({ type: "agent_token", agent: agentKey, step: 1, text: responseText });
-            // Strip leading prose for structured agents (handles "Synthesizing…" preamble)
-            if (STRUCTURED_AGENTS_FA.includes(agentKey)) {
-              const jsonStart = responseText.indexOf("{");
-              if (jsonStart > 0) responseText = responseText.slice(jsonStart);
+
+            const tryParse = (txt: string): { parsed: any; err: string } => {
+              let t = txt;
+              if (STRUCTURED_AGENTS_FA.includes(agentKey)) {
+                const js = t.indexOf("{");
+                if (js > 0) t = t.slice(js);
+              }
+              try { return { parsed: JSON.parse(t), err: "" }; }
+              catch (e: any) { return { parsed: null, err: e?.message || "invalid JSON" }; }
+            };
+
+            let { parsed, err: parseErr } = tryParse(responseText);
+            // On parse failure, push the error back to the agent and ask for corrected JSON.
+            for (let fixAttempt = 0; !parsed && fixAttempt < 2; fixAttempt++) {
+              emit({ type: "agent_progress", agent: agentKey, step: 1, message: `Response wasn't valid JSON — asking agent to correct (try ${fixAttempt + 1})…` });
+              const fixPrompt = `Your previous response could not be parsed as JSON (error: ${parseErr}). Respond ONLY with a single valid JSON object — no markdown, no code fences, no prose before or after. Re-send the same analysis as strictly valid JSON.`;
+              try {
+                responseText = await callAgentApiRaw(agentKey as AgentKey, fixPrompt, chatId, emitToken);
+              } catch (e: any) {
+                parseErr = e?.message || "agent call failed";
+                break;
+              }
+              emit({ type: "agent_token", agent: agentKey, step: 1, text: responseText });
+              ({ parsed, err: parseErr } = tryParse(responseText));
             }
-            let parsed: any = null;
-            try {
-              parsed = JSON.parse(responseText);
+
+            if (parsed) {
               responseText = JSON.stringify(parsed, null, 2);
-            } catch {}
+            } else {
+              emit({ type: "agent_progress", agent: agentKey, step: 1, message: `Could not obtain valid JSON after retries — saving raw text.` });
+            }
 
             db.prepare(
               "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",

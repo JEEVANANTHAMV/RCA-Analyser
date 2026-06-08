@@ -15,6 +15,7 @@ import {
   adminListInvites,
   adminDeleteInvite,
   adminResetOperatorPassword,
+  adminResendInvite,
 } from "@/lib/admin.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,6 +41,7 @@ import {
   BarChart2,
   Users,
   FileText,
+  Mail,
 } from "lucide-react";
 
 export const Route = createFileRoute("/admin")({
@@ -141,6 +143,19 @@ function AdminPage() {
     onSuccess: () => {
       invalidate();
       toast.success("Invite code revoked");
+    },
+  });
+
+  const resendInviteFn = useServerFn(adminResendInvite);
+  const resendInvite = useMutation({
+    mutationFn: async (code: string) => resendInviteFn({ data: { code } }),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Invitation email resent successfully!");
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(message || "Failed to resend invitation email");
     },
   });
 
@@ -461,8 +476,14 @@ function AdminPage() {
                 generateInvite.mutate(
                   { email, role },
                   {
-                    onSuccess: () => {
-                      toast.success(`Invite generated and email sent to ${email}`);
+                    onSuccess: (res) => {
+                      if (res.emailSent) {
+                        toast.success(`Invite generated and email sent to ${email}`);
+                      } else {
+                        toast.warning(
+                          `Invite generated (Code: ${res.invite.code}), but email delivery failed: ${res.error}. You can try resending it.`
+                        );
+                      }
                       (e.target as HTMLFormElement).reset();
                     },
                     onError: (err: unknown) => {
@@ -722,17 +743,30 @@ function AdminPage() {
                           <td className="p-3">{badge}</td>
                           <td className="p-3 text-right space-x-1 whitespace-nowrap">
                             {!isUsed && !isExpired && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                title="Copy Invite Link"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(inviteUrl);
-                                  toast.success("Invite registration link copied!");
-                                }}
-                              >
-                                <Copy className="w-4 h-4" />
-                              </Button>
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  title="Resend Invitation Email"
+                                  disabled={resendInvite.isPending}
+                                  onClick={() => {
+                                    resendInvite.mutate(inv.code);
+                                  }}
+                                >
+                                  <Mail className="w-4 h-4 text-primary" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  title="Copy Invite Link"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(inviteUrl);
+                                    toast.success("Invite registration link copied!");
+                                  }}
+                                >
+                                  <Copy className="w-4 h-4" />
+                                </Button>
+                              </>
                             )}
                             <Button
                               size="sm"

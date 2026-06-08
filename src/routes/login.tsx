@@ -4,6 +4,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/login")({ component: LoginPage });
 
@@ -59,7 +60,7 @@ function LoginPage() {
           </div>
           {err && <p className="text-sm text-destructive font-mono">{err}</p>}
           <Button type="submit" disabled={loading} className="w-full">
-            {loading ? "Authenticating…" : "Sign in"}
+            {loading ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Authenticating…</>) : "Sign in"}
           </Button>
           <p className="text-sm text-muted-foreground text-center">
             No account?{" "}

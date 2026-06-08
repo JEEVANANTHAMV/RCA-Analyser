@@ -13,6 +13,7 @@ import {
   deleteInvite,
   adminResetPassword,
   AuthUser,
+  DbInvite,
 } from "@/lib/auth";
 import { sendInvitationEmail } from "@/lib/mail";
 
@@ -102,13 +103,60 @@ export const adminGenerateInvite = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { user } = context;
     await assertAdmin(user);
+
+    // Check for existing active (unused and unexpired) invite for the same email
+    const db = getDb();
+    const existing = db
+      .prepare(
+        "SELECT code FROM invites WHERE email = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')",
+      )
+      .get(data.email) as { code: string } | undefined;
+
+    if (existing) {
+      throw new Error(
+        "An active invitation already exists for this email address. Please resend the existing invitation instead.",
+      );
+    }
+
     const invite = createInvite(data.email, data.role, user.id);
+    try {
+      await sendInvitationEmail({
+        to: data.email,
+        code: invite.code,
+        role: data.role,
+      });
+      return { invite, emailSent: true };
+    } catch (err) {
+      console.error("Failed to send invitation email during generation:", err);
+      return {
+        invite,
+        emailSent: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+export const adminResendInvite = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ code: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    const db = getDb();
+    const invite = db.prepare("SELECT * FROM invites WHERE code = ?").get(data.code) as
+      | DbInvite
+      | undefined;
+    if (!invite) throw new Error("Invite not found");
+    if (invite.used_at) throw new Error("This invite has already been used");
+    if (new Date(invite.expires_at) < new Date()) throw new Error("This invite code has expired");
+    if (!invite.email) throw new Error("No recipient email specified for this invite");
+
     await sendInvitationEmail({
-      to: data.email,
+      to: invite.email,
       code: invite.code,
-      role: data.role,
+      role: invite.role,
     });
-    return invite;
+    return { ok: true };
   });
 
 export const adminBulkGenerateInvites = createServerFn({ method: "POST" })

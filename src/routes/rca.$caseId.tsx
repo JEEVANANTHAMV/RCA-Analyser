@@ -142,6 +142,15 @@ function parsePartialJson(jsonStr: string): any {
   }
 }
 
+// Safely render a fishbone cause that may be a plain string OR an object
+// ({cause, subCauses, weight, likelihood, status, evidence}).
+function causeText(c: any): string {
+  if (c == null) return "";
+  if (typeof c === "string") return c;
+  if (typeof c === "object") return c.cause || c.description || c.text || c.label || "";
+  return String(c);
+}
+
 function parseMaybeJson(str: string): any {
   if (!str) return null;
   let cleaned = str.trim();
@@ -2343,7 +2352,7 @@ function CasePage() {
                               <div key={cat} className="p-2 border border-border/40 bg-background/30 rounded">
                                 <span className="font-bold uppercase text-primary text-[9px] block mb-1">{cat}</span>
                                 <ul className="list-disc pl-3.5 space-y-0.5 text-muted-foreground">
-                                  {Array.isArray(causes) && causes.map((c: string, cidx: number) => <li key={cidx}>{c}</li>)}
+                                  {Array.isArray(causes) && causes.map((c: any, cidx: number) => <li key={cidx}>{causeText(c)}</li>)}
                                 </ul>
                               </div>
                             ))}
@@ -2388,7 +2397,7 @@ function CasePage() {
                                 <div key={cat} className="p-2 border border-border/40 bg-background/30 rounded">
                                   <span className="font-bold uppercase text-primary text-[9px] block mb-1">{cat}</span>
                                   <ul className="list-disc pl-3.5 space-y-0.5 text-muted-foreground">
-                                    {Array.isArray(causes) && causes.map((c: string, cidx: number) => <li key={cidx}>{c}</li>)}
+                                    {Array.isArray(causes) && causes.map((c: any, cidx: number) => <li key={cidx}>{causeText(c)}</li>)}
                                   </ul>
                                 </div>
                               ))}
@@ -2963,7 +2972,7 @@ function CasePage() {
                         <div key={cat} className="p-2.5 border border-border bg-background/50 rounded-lg">
                           <span className="font-bold uppercase text-primary text-[9px] block mb-1">{cat}</span>
                           <ul className="list-disc pl-3.5 space-y-0.5 text-muted-foreground">
-                            {Array.isArray(causes) && causes.map((c: string, cidx: number) => <li key={cidx}>{c}</li>)}
+                            {Array.isArray(causes) && causes.map((c: any, cidx: number) => <li key={cidx}>{causeText(c)}</li>)}
                           </ul>
                         </div>
                       ))}
@@ -6191,7 +6200,7 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
               {Array.isArray(causes) &&
                 causes.map((cause: any, idx: number) => (
                   <div key={idx} className="text-sm ml-2 mb-1">
-                    <span className="text-muted-foreground">• {cause.cause || cause}</span>
+                    <span className="text-muted-foreground">• {causeText(cause)}</span>
                     {cause.likelihood && (
                       <Badge
                         variant="outline"

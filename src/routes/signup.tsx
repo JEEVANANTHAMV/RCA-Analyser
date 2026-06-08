@@ -6,7 +6,7 @@ import { validateInviteCodeFn } from "@/lib/auth.functions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle2, XCircle, KeyRound, UserPlus } from "lucide-react";
+import { CheckCircle2, XCircle, KeyRound, UserPlus, Loader2 } from "lucide-react";
 
 export const Route = createFileRoute("/signup")({
   validateSearch: (search: Record<string, unknown>): { code?: string } => {
@@ -113,7 +113,7 @@ function SignupPage() {
                   onClick={() => handleVerify(inviteCode)}
                   disabled={verifying || !inviteCode.trim()}
                 >
-                  {verifying ? "Checking…" : "Verify"}
+                  {verifying ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Checking…</>) : "Verify"}
                 </Button>
               </div>
               {verifyErr && (
@@ -196,7 +196,7 @@ function SignupPage() {
             )}
 
             <Button type="submit" disabled={loading} className="w-full mt-2">
-              {loading ? "Provisioning Account…" : "Create Operator Account"}
+              {loading ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Provisioning Account…</>) : "Create Operator Account"}
             </Button>
 
             <div className="flex justify-between text-xs text-muted-foreground mono border-t border-border/50 pt-4 mt-6">
