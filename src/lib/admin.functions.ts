@@ -111,6 +111,46 @@ export const adminGenerateInvite = createServerFn({ method: "POST" })
     return invite;
   });
 
+export const adminBulkGenerateInvites = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z
+      .object({
+        textarea: z.string().min(1),
+        role: z.enum(["admin", "user"]),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { user } = context;
+    await assertAdmin(user);
+    const entries = data.textarea.split(";").map((s) => s.trim()).filter(Boolean);
+    const results: Array<{ email: string; code: string; ok: boolean }> = [];
+    for (const entry of entries) {
+      const parts = entry.trim().split(/\s+/);
+      const rawEmail = parts.length >= 2 ? parts[parts.length - 1] : parts[0];
+      const email = rawEmail.replace(/[;]$/, "").trim();
+      try {
+        z.string().email().parse(email);
+      } catch {
+        results.push({ email, code: "", ok: false });
+        continue;
+      }
+      try {
+        const invite = createInvite(email, data.role, user.id);
+        await sendInvitationEmail({
+          to: email,
+          code: invite.code,
+          role: data.role,
+        });
+        results.push({ email, code: invite.code, ok: true });
+      } catch {
+        results.push({ email, code: "", ok: false });
+      }
+    }
+    return { results };
+  });
+
 
 export const adminListInvites = createServerFn({ method: "GET" })
   .middleware([requireAuth])

@@ -11,6 +11,7 @@ import {
   adminToggleRole,
   adminDeleteUser,
   adminGenerateInvite,
+  adminBulkGenerateInvites,
   adminListInvites,
   adminDeleteInvite,
   adminResetOperatorPassword,
@@ -18,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { AGENT_BY_KEY, AgentKey } from "@/lib/agents";
 import { toast } from "sonner";
 import { DbUserRow, DbCaseRow, DbInvite } from "@/lib/auth";
@@ -118,6 +120,15 @@ function AdminPage() {
   const generateInvite = useMutation({
     mutationFn: async (v: { email: string; role: "admin" | "user" }) =>
       generateInviteFn({ data: v }),
+    onSuccess: () => {
+      invalidate();
+    },
+  });
+
+  const bulkInviteFn = useServerFn(adminBulkGenerateInvites);
+  const bulkInvite = useMutation({
+    mutationFn: async (v: { textarea: string; role: "admin" | "user" }) =>
+      bulkInviteFn({ data: v }),
     onSuccess: () => {
       invalidate();
     },
@@ -489,6 +500,60 @@ function AdminPage() {
               <Button type="submit" disabled={generateInvite.isPending} className="w-full mt-2">
                 {generateInvite.isPending ? "Generating & Sending…" : "Generate & Send Invitation"}
               </Button>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const fd = new FormData(e.currentTarget);
+                  const textarea = fd.get("bulk-textarea") as string;
+                  const role = fd.get("bulk-role") as "admin" | "user";
+                  bulkInvite.mutate(
+                    { textarea, role },
+                    {
+                      onSuccess: (res) => {
+                        const r = res as { results: Array<{ email: string; code: string; ok: boolean }> };
+                        const ok = r.results.filter((x) => x.ok).length;
+                        const fail = r.results.filter((x) => !x.ok).length;
+                        toast.success(`${ok} invite(s) generated${fail > 0 ? `, ${fail} failed` : ""}`);
+                      },
+                      onError: (err: unknown) => {
+                        const message = err instanceof Error ? err.message : String(err);
+                        toast.error(message || "Bulk invite failed");
+                      },
+                    },
+                  );
+                }}
+                className="mt-4 pt-4 border-t border-border/50 space-y-3"
+              >
+                <div className="space-y-1.5">
+                  <Label>Bulk Import</Label>
+                  <Textarea
+                    name="bulk-textarea"
+                    required
+                    rows={6}
+                    placeholder="Paste contacts below (semicolon separated, email is last token per entry)&#10;&#10;e.g. Manish Motwani Manish.Motwani@vedanta.co.in; Montu Makwana Montu.Makwana@vedanta.co.in;"
+                  />
+                  <p className="text-[10px] text-muted-foreground mono">
+                    // Format per entry: Name Lastname email@domain.com — separate entries with ;
+                  </p>
+                </div>
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 space-y-1.5">
+                    <Label htmlFor="bulk-role">Grant Role</Label>
+                    <select
+                      id="bulk-role"
+                      name="bulk-role"
+                      className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <option value="user">User (Operator)</option>
+                      <option value="admin">Administrator</option>
+                    </select>
+                  </div>
+                  <Button type="submit" disabled={bulkInvite.isPending} className="mb-0">
+                    {bulkInvite.isPending ? "Processing…" : "Bulk Import & Send"}
+                  </Button>
+                </div>
+              </form>
             </form>
           </div>
 
