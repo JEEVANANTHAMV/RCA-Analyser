@@ -15,4 +15,9 @@ export default defineConfig({
       disableCsrfMiddlewareWarning: true,
     },
   },
+  vite: {
+    server: {
+      allowedHosts: ["vedanta.forjinn.com"],
+    },
+  },
 });
