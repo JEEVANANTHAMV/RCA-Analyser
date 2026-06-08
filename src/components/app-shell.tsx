@@ -6,8 +6,9 @@ import { Label } from "@/components/ui/label";
 import { useServerFn } from "@tanstack/react-start";
 import { changeOwnPasswordFn } from "@/lib/auth.functions";
 import { toast } from "sonner";
-import { Activity, LayoutDashboard, ShieldAlert, LogOut, Key, X } from "lucide-react";
+import { Activity, LayoutDashboard, ShieldAlert, LogOut, Key, X, Sun, Moon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTheme } from "@/components/theme-provider";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, isAdmin, logout } = useAuth();
@@ -16,6 +17,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const { theme, toggleTheme } = useTheme();
 
   const changePassFn = useServerFn(changeOwnPasswordFn);
 
@@ -75,6 +77,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               title="Change Password"
             >
               <Key className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleTheme}
+              title={theme === "light" ? "Switch to Dark Mode" : "Switch to Light Mode"}
+            >
+              {theme === "light" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
             </Button>
             <Button
               variant="ghost"

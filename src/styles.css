@@ -111,6 +111,65 @@
   --sidebar-accent-foreground: oklch(0.94 0.01 100);
   --sidebar-border: oklch(0.26 0.022 255);
   --sidebar-ring: oklch(0.78 0.17 70);
+
+  --input-bg: oklch(0.12 0.01 255);
+  --input-border: oklch(0.38 0.015 255);
+  --input-focus-bg: oklch(0.14 0.01 255);
+  --input-placeholder: oklch(0.58 0.015 250);
+}
+
+.light {
+  --background: oklch(0.98 0.005 255);
+  --foreground: oklch(0.2 0.015 255);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.015 255);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.015 255);
+
+  --primary: oklch(0.65 0.17 70);
+  --primary-foreground: oklch(0.98 0 0);
+
+  --secondary: oklch(0.94 0.01 255);
+  --secondary-foreground: oklch(0.2 0.015 255);
+
+  --muted: oklch(0.96 0.01 255);
+  --muted-foreground: oklch(0.5 0.015 250);
+
+  --accent: oklch(0.58 0.16 200);
+  --accent-foreground: oklch(0.98 0 0);
+
+  --destructive: oklch(0.55 0.22 25);
+  --destructive-foreground: oklch(0.98 0 0);
+
+  --border: oklch(0.88 0.015 255);
+  --input: oklch(0.96 0.01 255);
+  --ring: oklch(0.65 0.17 70);
+
+  --chart-1: oklch(0.65 0.17 70);
+  --chart-2: oklch(0.58 0.16 200);
+  --chart-3: oklch(0.6 0.18 145);
+  --chart-4: oklch(0.5 0.2 30);
+  --chart-5: oklch(0.58 0.18 320);
+
+  --signal-ok: oklch(0.58 0.17 145);
+  --signal-warn: oklch(0.68 0.17 85);
+  --signal-crit: oklch(0.55 0.24 25);
+  --grid-line: oklch(0.88 0.015 255 / 0.4);
+
+  --sidebar: oklch(0.96 0.01 255);
+  --sidebar-foreground: oklch(0.2 0.015 255);
+  --sidebar-primary: oklch(0.65 0.17 70);
+  --sidebar-primary-foreground: oklch(0.98 0 0);
+  --sidebar-accent: oklch(0.94 0.01 255);
+  --sidebar-accent-foreground: oklch(0.2 0.015 255);
+  --sidebar-border: oklch(0.88 0.015 255);
+  --sidebar-ring: oklch(0.65 0.17 70);
+
+  --input-bg: oklch(0.98 0.005 255);
+  --input-border: oklch(0.8 0.015 255);
+  --input-focus-bg: oklch(1 0 0);
+  --input-placeholder: oklch(0.48 0.015 250);
 }
 
 @layer base {
@@ -129,8 +188,8 @@
   input[type="password"],
   textarea,
   select {
-    background-color: oklch(0.12 0.01 255) !important; /* clean inset dark bg */
-    border: 1px solid oklch(0.38 0.015 255) !important; /* crisp, visible border */
+    background-color: var(--input-bg) !important;
+    border: 1px solid var(--input-border) !important;
     color: var(--color-foreground) !important;
     border-radius: var(--radius-md) !important;
     transition: all 0.15s ease-in-out !important;
@@ -141,7 +200,7 @@
   input[type="password"]:focus,
   textarea:focus,
   select:focus {
-    background-color: oklch(0.14 0.01 255) !important;
+    background-color: var(--input-focus-bg) !important;
     border-color: var(--color-primary) !important;
     box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.25) !important;
     outline: none !important;
@@ -151,7 +210,7 @@
   input[type="email"]::placeholder,
   input[type="password"]::placeholder,
   textarea::placeholder {
-    color: oklch(0.58 0.015 250) !important;
+    color: var(--input-placeholder) !important;
     opacity: 0.95 !important;
   }
   body {
@@ -296,4 +355,14 @@
 }
 .text-\[11px\], .text-\[11px\] * {
   font-size: 0.875rem !important; /* ~14px */
+}
+
+.capa-textarea,
+.capa-textarea:focus {
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  min-height: auto !important;
+  outline: none !important;
 }

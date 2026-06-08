@@ -10,7 +10,6 @@ import {
   adminDeleteCase,
   adminToggleRole,
   adminDeleteUser,
-  adminCreateOperator,
   adminGenerateInvite,
   adminListInvites,
   adminDeleteInvite,
@@ -115,22 +114,9 @@ function AdminPage() {
     },
   });
 
-  const createOperatorFn = useServerFn(adminCreateOperator);
-  const createOperator = useMutation({
-    mutationFn: async (v: {
-      email: string;
-      fullName: string;
-      password: string;
-      role: "admin" | "user";
-    }) => createOperatorFn({ data: v }),
-    onSuccess: () => {
-      invalidate();
-    },
-  });
-
   const generateInviteFn = useServerFn(adminGenerateInvite);
   const generateInvite = useMutation({
-    mutationFn: async (v: { email?: string; role: "admin" | "user" }) =>
+    mutationFn: async (v: { email: string; role: "admin" | "user" }) =>
       generateInviteFn({ data: v }),
     onSuccess: () => {
       invalidate();
@@ -447,31 +433,29 @@ function AdminPage() {
       )}
 
       {activeTab === "access" && (
-        <div className="grid md:grid-cols-2 gap-6 animate-fadeIn">
-          {/* Direct Provisioning */}
-          <div className="panel h-fit">
+        <div className="space-y-6 max-w-4xl mx-auto animate-fadeIn">
+          {/* Invites Management */}
+          <div className="panel max-w-xl mx-auto">
             <div className="panel-header">
-              <span>// DIRECT OPERATOR PROVISIONING</span>
+              <span>// GENERATE & SEND REGISTRATION INVITE</span>
             </div>
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
-                const email = fd.get("email") as string;
-                const fullName = fd.get("fullName") as string;
-                const password = fd.get("password") as string;
-                const role = fd.get("role") as "admin" | "user";
+                const email = fd.get("invite-email") as string;
+                const role = fd.get("invite-role") as "admin" | "user";
 
-                createOperator.mutate(
-                  { email, fullName, password, role },
+                generateInvite.mutate(
+                  { email, role },
                   {
                     onSuccess: () => {
-                      toast.success("Operator account provisioned successfully");
+                      toast.success(`Invite generated and email sent to ${email}`);
                       (e.target as HTMLFormElement).reset();
                     },
                     onError: (err: unknown) => {
                       const message = err instanceof Error ? err.message : String(err);
-                      toast.error(message || "Failed to provision operator");
+                      toast.error(message || "Failed to generate invite");
                     },
                   },
                 );
@@ -479,191 +463,120 @@ function AdminPage() {
               className="p-6 space-y-4"
             >
               <div className="space-y-1.5">
-                <Label htmlFor="direct-name">Full Name</Label>
-                <Input id="direct-name" name="fullName" required placeholder="e.g. Walter White" />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="direct-email">Email Address</Label>
+                <Label htmlFor="invite-email">Recipient Email Address</Label>
                 <Input
-                  id="direct-email"
-                  name="email"
+                  id="invite-email"
+                  name="invite-email"
                   type="email"
                   required
-                  placeholder="e.g. walter@company.com"
+                  placeholder="e.g. operator@company.com"
                 />
+                <p className="text-[10px] text-muted-foreground mono">
+                  // An invitation email with the setup link will be sent directly to this address
+                </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="direct-password">Password</Label>
-                <Input
-                  id="direct-password"
-                  name="password"
-                  type="password"
-                  required
-                  minLength={8}
-                  placeholder="Minimum 8 characters"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="direct-role">Assigned Privilege Role</Label>
+                <Label htmlFor="invite-role">Grant Role on Signup</Label>
                 <select
-                  id="direct-role"
-                  name="role"
+                  id="invite-role"
+                  name="invite-role"
                   className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
                   <option value="user">User (Operator)</option>
                   <option value="admin">Administrator</option>
                 </select>
               </div>
-              <Button type="submit" disabled={createOperator.isPending} className="w-full mt-2">
-                {createOperator.isPending ? "Provisioning Operator…" : "Provision Operator Account"}
+              <Button type="submit" disabled={generateInvite.isPending} className="w-full mt-2">
+                {generateInvite.isPending ? "Generating & Sending…" : "Generate & Send Invitation"}
               </Button>
             </form>
           </div>
 
-          {/* Invites Management */}
-          <div className="space-y-6">
-            <div className="panel h-fit">
-              <div className="panel-header">
-                <span>// GENERATE REGISTRATION INVITE</span>
-              </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.currentTarget);
-                  const email = (fd.get("invite-email") as string) || undefined;
-                  const role = fd.get("invite-role") as "admin" | "user";
-
-                  generateInvite.mutate(
-                    { email, role },
-                    {
-                      onSuccess: (data: { code: string }) => {
-                        toast.success(`Generated invite code: ${data.code}`);
-                        (e.target as HTMLFormElement).reset();
-                      },
-                      onError: (err: unknown) => {
-                        const message = err instanceof Error ? err.message : String(err);
-                        toast.error(message || "Failed to generate invite");
-                      },
-                    },
-                  );
-                }}
-                className="p-6 space-y-4"
-              >
-                <div className="space-y-1.5">
-                  <Label htmlFor="invite-email">Target Email Restriction (Optional)</Label>
-                  <Input
-                    id="invite-email"
-                    name="invite-email"
-                    type="email"
-                    placeholder="e.g. operator@company.com"
-                  />
-                  <p className="text-[10px] text-muted-foreground mono">
-                    // If set, only this email can redeem the code
-                  </p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="invite-role">Grant Role on Signup</Label>
-                  <select
-                    id="invite-role"
-                    name="invite-role"
-                    className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    <option value="user">User (Operator)</option>
-                    <option value="admin">Administrator</option>
-                  </select>
-                </div>
-                <Button type="submit" disabled={generateInvite.isPending} className="w-full mt-2">
-                  {generateInvite.isPending ? "Generating Code…" : "Generate Invite Link"}
-                </Button>
-              </form>
+          <div className="panel">
+            <div className="panel-header">
+              <span>// PENDING REGISTRATION INVITES</span>
             </div>
-
-            <div className="panel">
-              <div className="panel-header">
-                <span>// PENDING REGISTRATION INVITES</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-xs uppercase text-muted-foreground mono border-b border-border">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-xs uppercase text-muted-foreground mono border-b border-border">
+                  <tr>
+                    <th className="text-left p-3">Invite Code</th>
+                    <th className="text-left p-3">Recipient Email</th>
+                    <th className="text-left p-3">Role</th>
+                    <th className="text-left p-3">Status</th>
+                    <th className="text-right p-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invites.data?.invites?.length === 0 ? (
                     <tr>
-                      <th className="text-left p-3">Invite Code</th>
-                      <th className="text-left p-3">Target User</th>
-                      <th className="text-left p-3">Role</th>
-                      <th className="text-left p-3">Status</th>
-                      <th className="text-right p-3">Actions</th>
+                      <td colSpan={5} className="p-6 text-center text-muted-foreground mono">
+                        // No pending invite codes generated
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {invites.data?.invites?.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="p-6 text-center text-muted-foreground mono">
-                          // No pending invite codes generated
-                        </td>
-                      </tr>
-                    ) : (
-                      (invites.data?.invites ?? []).map((inv: DbInvite) => {
-                        const isExpired = new Date(inv.expires_at) < new Date();
-                        const isUsed = !!inv.used_at;
-                        let badge = (
-                          <span className="text-[color:var(--signal-ok)] font-mono text-xs px-2 py-0.5 rounded bg-[color:var(--color-signal-ok)]/10">
-                            // ACTIVE
+                  ) : (
+                    (invites.data?.invites ?? []).map((inv: DbInvite) => {
+                      const isExpired = new Date(inv.expires_at) < new Date();
+                      const isUsed = !!inv.used_at;
+                      let badge = (
+                        <span className="text-[color:var(--signal-ok)] font-mono text-xs px-2 py-0.5 rounded bg-[color:var(--color-signal-ok)]/10">
+                          // ACTIVE
+                        </span>
+                      );
+                      if (isUsed)
+                        badge = (
+                          <span className="text-muted-foreground font-mono text-xs px-2 py-0.5 rounded bg-muted">
+                            // USED
                           </span>
                         );
-                        if (isUsed)
-                          badge = (
-                            <span className="text-muted-foreground font-mono text-xs px-2 py-0.5 rounded bg-muted">
-                              // USED
-                            </span>
-                          );
-                        else if (isExpired)
-                          badge = (
-                            <span className="text-[color:var(--signal-crit)] font-mono text-xs px-2 py-0.5 rounded bg-[color:var(--color-signal-crit)]/10">
-                              // EXPIRED
-                            </span>
-                          );
+                      else if (isExpired)
+                        badge = (
+                          <span className="text-[color:var(--signal-crit)] font-mono text-xs px-2 py-0.5 rounded bg-[color:var(--color-signal-crit)]/10">
+                            // EXPIRED
+                          </span>
+                        );
 
-                        const inviteUrl = `${window.location.origin}/signup?code=${inv.code}`;
+                      const inviteUrl = `${window.location.origin}/signup?code=${inv.code}`;
 
-                        return (
-                          <tr key={inv.code} className="border-b border-border/50">
-                            <td className="p-3 mono font-semibold text-primary">{inv.code}</td>
-                            <td className="p-3 mono text-xs">{inv.email ?? "Public (Anyone)"}</td>
-                            <td className="p-3 mono text-xs uppercase">{inv.role}</td>
-                            <td className="p-3">{badge}</td>
-                            <td className="p-3 text-right space-x-1 whitespace-nowrap">
-                              {!isUsed && !isExpired && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  title="Copy Invite Link"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(inviteUrl);
-                                    toast.success("Invite registration link copied!");
-                                  }}
-                                >
-                                  <Copy className="w-4 h-4" />
-                                </Button>
-                              )}
+                      return (
+                        <tr key={inv.code} className="border-b border-border/50">
+                          <td className="p-3 mono font-semibold text-primary">{inv.code}</td>
+                          <td className="p-3 mono text-xs">{inv.email ?? "Public (Anyone)"}</td>
+                          <td className="p-3 mono text-xs uppercase">{inv.role}</td>
+                          <td className="p-3">{badge}</td>
+                          <td className="p-3 text-right space-x-1 whitespace-nowrap">
+                            {!isUsed && !isExpired && (
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                title="Revoke Invite"
+                                title="Copy Invite Link"
                                 onClick={() => {
-                                  if (confirm(`Revoke and delete invite code ${inv.code}?`)) {
-                                    deleteInvite.mutate(inv.code);
-                                  }
+                                  navigator.clipboard.writeText(inviteUrl);
+                                  toast.success("Invite registration link copied!");
                                 }}
                               >
-                                <Trash2 className="w-4 h-4 text-destructive" />
+                                <Copy className="w-4 h-4" />
                               </Button>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              title="Revoke Invite"
+                              onClick={() => {
+                                if (confirm(`Revoke and delete invite code ${inv.code}?`)) {
+                                  deleteInvite.mutate(inv.code);
+                                }
+                              }}
+                            >
+                              <Trash2 className="w-4 h-4 text-destructive" />
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

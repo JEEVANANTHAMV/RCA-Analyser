@@ -5,6 +5,15 @@ import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// `node server.js` does NOT auto-load .env the way `vite dev` does. Load it here,
+// before importing the worker bundle (module-level code reads process.env at import time),
+// so DATABASE_PATH, JWT_SECRET, AGENT_*, SMTP_*, etc. are populated in production.
+const envPath = join(__dirname, ".env");
+if (existsSync(envPath)) {
+  process.loadEnvFile(envPath);
+}
+
 const distServer = join(__dirname, "dist", "server");
 const distClient = join(__dirname, "dist", "client");
 

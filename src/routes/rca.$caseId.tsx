@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { AuthGate } from "@/components/app-shell";
 import { AGENTS, type AgentKey } from "@/lib/agents";
+import { normalizePareto, normalizeTimeline, normalizeEquipment, normalizeFishbone } from "@/lib/rca.normalize";
 import {
   getCaseFull,
   ensureConversation,
@@ -83,7 +84,7 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
 function parsePartialJson(jsonStr: string): any {
   try {
     return JSON.parse(jsonStr);
-  } catch {}
+  } catch { }
 
   let cleaned = jsonStr.trim();
   if (!cleaned) return null;
@@ -144,7 +145,7 @@ function parsePartialJson(jsonStr: string): any {
 function parseMaybeJson(str: string): any {
   if (!str) return null;
   let cleaned = str.trim();
-  
+
   // Extract JSON block if it's inside markdown code blocks
   const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
   const match = cleaned.match(jsonBlockRegex);
@@ -152,21 +153,42 @@ function parseMaybeJson(str: string): any {
     cleaned = match[1].trim();
   }
 
-  // Find first { or [ and last } or ]
+  // Find first { or [
   const firstBrace = cleaned.indexOf("{");
   const firstBracket = cleaned.indexOf("[");
   let startIdx = -1;
-  let endToken = "";
+  let openToken = "{";
+  let endToken = "}";
   if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
     startIdx = firstBrace;
+    openToken = "{";
     endToken = "}";
   } else if (firstBracket !== -1) {
     startIdx = firstBracket;
+    openToken = "[";
     endToken = "]";
   }
 
   if (startIdx !== -1) {
-    const lastIdx = cleaned.lastIndexOf(endToken);
+    // Prefer the FIRST complete balanced value (agents sometimes emit `{...}{...}`),
+    // scanning string/escape-aware. Fall back to first→last if never balanced.
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let balancedEnd = -1;
+    for (let i = startIdx; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (esc) { esc = false; continue; }
+      if (ch === "\\") { esc = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === openToken) depth++;
+      else if (ch === endToken) {
+        depth--;
+        if (depth === 0) { balancedEnd = i; break; }
+      }
+    }
+    const lastIdx = balancedEnd !== -1 ? balancedEnd : cleaned.lastIndexOf(endToken);
     if (lastIdx > startIdx) {
       cleaned = cleaned.substring(startIdx, lastIdx + 1);
     }
@@ -174,12 +196,12 @@ function parseMaybeJson(str: string): any {
 
   try {
     return JSON.parse(cleaned);
-  } catch {}
+  } catch { }
 
   // Fallback to parsePartialJson
   try {
     return parsePartialJson(cleaned);
-  } catch {}
+  } catch { }
 
   return null;
 }
@@ -283,7 +305,7 @@ function CasePage() {
     redundancyMet: false
   });
   const [editRootCauseText, setEditRootCauseText] = useState("");
-  const [reportDownloading, setReportDownloading] = useState<"xlsx" | "docx" | null>(null);
+  const [reportDownloading, setReportDownloading] = useState<"xlsx" | "docx" | "pdf" | "html" | null>(null);
   const [exportDownloading, setExportDownloading] = useState<"html" | "docx" | null>(null);
   const [streamingChatText, setStreamingChatText] = useState<string | null>(null);
   const [agentParsedData, setAgentParsedData] = useState<Record<string, any>>({});
@@ -296,6 +318,8 @@ function CasePage() {
   const [autoProgress, setAutoProgress] = useState<Array<{
     type: string; agent?: string; name?: string; step?: number; message?: string;
   }>>([]);
+  // Per-agent live streaming text during full automation (agent_token events).
+  const [autoLiveText, setAutoLiveText] = useState<Record<string, string>>({});
   const [autoRunning, setAutoRunning] = useState(false);
   const [activeEditCat, setActiveEditCat] = useState("manpower");
 
@@ -574,6 +598,7 @@ function CasePage() {
   const autoMut = useMutation({
     mutationFn: async () => {
       setAutoProgress([]);
+      setAutoLiveText({});
       setAutoRunning(true);
       const res = await runAutoFn({ data: { caseId } });
       if (!(res instanceof Response)) return res;
@@ -592,8 +617,13 @@ function CasePage() {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line);
+            // Live token stream → per-agent text (kept out of autoProgress to avoid bloat).
+            if (event.type === "agent_token" && event.agent) {
+              setAutoLiveText((prev) => ({ ...prev, [event.agent]: event.text || "" }));
+              continue;
+            }
             setAutoProgress((prev) => [...prev, event]);
-          } catch {}
+          } catch { }
         }
       }
     },
@@ -602,6 +632,7 @@ function CasePage() {
       qc.invalidateQueries({ queryKey: ["case", caseId] });
       qc.invalidateQueries({ queryKey: ["conv", caseId] });
       qc.invalidateQueries({ queryKey: ["msgs"] });
+      qc.invalidateQueries({ queryKey: ["combined", caseId] });
       toast.success("Full RCA automation complete!");
     },
     onError: (err: any) => {
@@ -708,7 +739,7 @@ function CasePage() {
           nextParsed = typeof latestAssistantMsg.raw_response === "string"
             ? parseMaybeJson(latestAssistantMsg.raw_response)
             : latestAssistantMsg.raw_response;
-        } catch {}
+        } catch { }
       }
     }
 
@@ -738,13 +769,42 @@ function CasePage() {
         immediateParsed = typeof latestAssistantMsg.raw_response === "string"
           ? parseMaybeJson(latestAssistantMsg.raw_response)
           : latestAssistantMsg.raw_response;
-      } catch {}
+      } catch { }
     }
   }
 
-  const parsedData = currentAgent
+  let parsedData = currentAgent
     ? (agentParsedData[currentAgent.key] || (immediateParsed && typeof immediateParsed === "object" ? immediateParsed : null))
     : null;
+
+  // Inject the canonical compact shape so the visual workspace (Pareto chart, Gantt,
+  // fishbone diagram, equipment metrics) renders regardless of which schema the agent
+  // returned (compact vs the rich "analyst" schema).
+  if (parsedData && currentAgent) {
+    const k = currentAgent.key;
+    if (k === "pareto") {
+      const modes = normalizePareto(parsedData);
+      if (modes.length && !(parsedData.paretoAnalysis?.byFailureMode?.length)) {
+        parsedData = { ...parsedData, paretoAnalysis: { ...(parsedData.paretoAnalysis || {}), byFailureMode: modes } };
+      }
+    } else if (k === "timeline") {
+      const phases = normalizeTimeline(parsedData);
+      if (phases.length && !(parsedData.timeline?.phases?.length)) {
+        parsedData = { ...parsedData, timeline: { ...(parsedData.timeline || {}), phases } };
+      }
+    } else if (k === "equipment") {
+      const rm = normalizeEquipment(parsedData);
+      if ((rm.mtbf || rm.mttr || rm.availability) && !parsedData.reliabilityMetrics) {
+        parsedData = { ...parsedData, reliabilityMetrics: rm };
+      }
+    } else if (k === "fishbone") {
+      const fb = normalizeFishbone(parsedData);
+      const hasFb = parsedData.fishbone && Object.keys(parsedData.fishbone).some((c: string) => (parsedData.fishbone[c] || []).length);
+      if (Object.keys(fb).length && !hasFb) {
+        parsedData = { ...parsedData, fishbone: fb };
+      }
+    }
+  }
 
   // Keep a stable ref so debounced auto-save closures always have current parsedData
   parsedDataRef.current = parsedData;
@@ -811,7 +871,7 @@ function CasePage() {
             symptoms = parsedInc.witnessedSymptoms || "";
             maintChecked = !!parsedInc.maintenanceHistoryChecked;
           }
-        } catch {}
+        } catch { }
       }
 
       // If fields are empty, fallback to parsedData from AI response
@@ -820,7 +880,7 @@ function CasePage() {
         effect = parsedData.effect || parsedData.effectImpact || "";
         gapsStr = Array.isArray(parsedData.gaps) ? parsedData.gaps.join("\n") : "";
         followUpsStr = Array.isArray(parsedData.followUps) ? parsedData.followUps.join("\n") : "";
-        
+
         const context = parsedData.operationalContext || {};
         equip = parsedData.equipmentName || context.equipmentName || "";
         loc = parsedData.location || context.location || "";
@@ -834,7 +894,7 @@ function CasePage() {
         try {
           const parsedInc = JSON.parse(caseQ.data.case.incident_data);
           problem = parsedInc.description || "";
-        } catch {}
+        } catch { }
       }
 
       setEditProblemStatement(problem);
@@ -882,7 +942,7 @@ function CasePage() {
                   selectedAnswer: selected,
                 });
               }
-            } catch {}
+            } catch { }
           }
         }
       }
@@ -899,7 +959,7 @@ function CasePage() {
         } else if (displayAns.startsWith("I select ")) {
           displayAns = displayAns.substring(9).trim();
         }
-        
+
         return {
           id: `why-${s.stepNumber}`,
           parentId: s.stepNumber > 1 ? `why-${s.stepNumber - 1}` : null,
@@ -949,7 +1009,7 @@ function CasePage() {
                   data: parsed,
                 };
               }
-            } catch {}
+            } catch { }
           }
         }
 
@@ -981,11 +1041,11 @@ function CasePage() {
           if (!n) return null;
           const children = Array.isArray(n.children) ? n.children.map((c: any) => normaliseNode(c, depth + 1))
             : Array.isArray(n.branches) ? n.branches.map((b: any, bi: number) => normaliseNode({ ...b, id: b.id || `branch-${depth}-${bi}` }, depth + 1))
-            : Array.isArray(n.causes) ? n.causes.map((c: any, ci: number) => ({
+              : Array.isArray(n.causes) ? n.causes.map((c: any, ci: number) => ({
                 id: `cause-${depth}-${ci}`, label: typeof c === "string" ? c : c.label || "Cause",
                 type: "event", probability: (c.probability || c.likelihood || 0.1),
               }))
-            : [];
+                : [];
           return {
             id: n.id || n.eventId || `node-${depth}`,
             label: n.label || n.description || n.name || "Event",
@@ -1042,7 +1102,7 @@ function CasePage() {
         if (rawTree) {
           setFaultTree(normaliseNode(rawTree));
         }
-       } else if (currentAgent?.key === "timeline") {
+      } else if (currentAgent?.key === "timeline") {
         let timelineData = parsedData;
         let phases = [];
 
@@ -1099,7 +1159,7 @@ function CasePage() {
         } else if (timelineData.timeline && Array.isArray(timelineData.timeline.phases)) {
           setTimelineEvents(timelineData.timeline.phases);
         }
-       } else if (currentAgent?.key === "pareto") {
+      } else if (currentAgent?.key === "pareto") {
         let byFailureMode: Array<{ mode: string; frequency: number }> = [];
         if (parsedData.paretoAnalysis?.byFailureMode && Array.isArray(parsedData.paretoAnalysis.byFailureMode)) {
           byFailureMode = parsedData.paretoAnalysis.byFailureMode;
@@ -1137,46 +1197,76 @@ function CasePage() {
             equipment: { ...parsedData, reliabilityMetrics: metrics },
           }));
         }
-       } else if (currentAgent?.key === "report") {
+      } else if (currentAgent?.key === "report") {
+        // Prioritize nested rcaReport or reportAnalysis which contain the full details
         let reportData: any = parsedData;
-        if (parsedData.rootCause || parsedData.correctiveActionsList) {
-          // Standard format already
-        } else if (parsedData.reportAnalysis && (parsedData.reportAnalysis.rootCause || parsedData.reportAnalysis.correctiveActionsList)) {
-          reportData = parsedData.reportAnalysis;
-        } else if (parsedData.rcaReport) {
-          // Actual AI format: {"rcaReport": {"rootCause": ..., "correctiveActionsList": [...]}}
+        if (parsedData.rcaReport) {
           reportData = parsedData.rcaReport;
-          // Also handle nested CAPA key names the AI might use
-          if (reportData.capaPlan) {
-            reportData.correctiveActionsList = reportData.capaPlan.correctiveActions || reportData.capaPlan.actions || reportData.correctiveActionsList;
-            reportData.preventiveActions = reportData.capaPlan.preventiveActions || reportData.preventiveActions;
-          }
         } else if (parsedData.reportAnalysis) {
           reportData = parsedData.reportAnalysis;
         }
-        if (reportData.rootCause) {
-          setEditRootCauseText(reportData.rootCause);
+
+        // Retrieve root cause text (prioritize the plural rootCauses array from rcaReport)
+        let rc = "";
+        if (Array.isArray(reportData.rootCauses)) {
+          rc = reportData.rootCauses.filter(Boolean).join("\n");
+        } else if (reportData.rootCause) {
+          rc = reportData.rootCause;
+        } else if (parsedData.rootCause) {
+          rc = parsedData.rootCause;
+        } else if (Array.isArray(parsedData.rootCauses)) {
+          rc = parsedData.rootCauses.filter(Boolean).join("\n");
         }
-        if (Array.isArray(reportData.correctiveActionsList)) {
-          setCapaActions(reportData.correctiveActionsList);
+        if (rc) {
+          setEditRootCauseText(rc);
+        }
+
+        // Map report actionPlan to correctiveActionsList
+        let rawCapa: any[] | null = null;
+        if (Array.isArray(reportData.actionPlan)) {
+          rawCapa = reportData.actionPlan;
+        } else if (Array.isArray(reportData.correctiveActionsList)) {
+          rawCapa = reportData.correctiveActionsList;
+        } else if (Array.isArray(parsedData.correctiveActionsList)) {
+          rawCapa = parsedData.correctiveActionsList;
+        }
+
+        if (Array.isArray(rawCapa)) {
+          const normalized = rawCapa.map((item: any, i: number) => {
+            if (typeof item === "string") {
+              return { id: `ca-${i}-${Date.now()}`, desc: item, owner: "Operator", date: "2026-06-30", status: "Pending", type: "CA" };
+            }
+            return {
+              id: item.id || `capa-${i}-${Date.now()}`,
+              desc: item.action || item.desc || "",
+              owner: item.responsible || item.owner || "Operator",
+              dept: item.department || item.dept || "",
+              date: item.target || item.date || "2026-06-30",
+              status: item.status || "Pending",
+              type: item.type || "CA"
+            };
+          });
+          setCapaActions(normalized);
         } else {
           const combined: any[] = [];
-          if (Array.isArray(reportData.correctiveActions)) {
-            reportData.correctiveActions.forEach((a: string, i: number) => {
-              combined.push({ id: `ca-${i}`, desc: a, owner: "Operator", date: "2026-06-01", status: "Pending" });
+          const ca = reportData.correctiveActions || parsedData.correctiveActions;
+          const pa = reportData.preventiveActions || parsedData.preventiveActions;
+          if (Array.isArray(ca)) {
+            ca.forEach((a: string, i: number) => {
+              combined.push({ id: `ca-${i}`, desc: a, owner: "Operator", date: "2026-06-01", status: "Pending", type: "CA" });
             });
           }
-          if (Array.isArray(reportData.preventiveActions)) {
-            reportData.preventiveActions.forEach((a: string, i: number) => {
-              combined.push({ id: `pa-${i}`, desc: a, owner: "Plant Manager", date: "2026-06-15", status: "Pending" });
+          if (Array.isArray(pa)) {
+            pa.forEach((a: string, i: number) => {
+              combined.push({ id: `pa-${i}`, desc: a, owner: "Plant Manager", date: "2026-06-15", status: "Pending", type: "PA" });
             });
           }
           if (combined.length > 0) {
             setCapaActions(combined);
           }
         }
-        if (reportData.checklist) {
-          setCapaChecklist(reportData.checklist);
+        if (reportData.checklist || parsedData.checklist) {
+          setCapaChecklist(reportData.checklist || parsedData.checklist);
         }
       }
     }
@@ -1219,7 +1309,7 @@ function CasePage() {
     if (editEffect.trim()) score += 20;
     if (editGaps.trim()) score += 10;
     if (editFollowUps.trim()) score += 10;
-    
+
     if (editEquipmentName.trim()) score += 8;
     if (editLocation.trim()) score += 8;
     if (editOperatingConditions.trim()) score += 8;
@@ -1342,7 +1432,7 @@ function CasePage() {
           try {
             const parsed = JSON.parse(caseQ.data.case.incident_data);
             caseAttachments = parsed.attachments || [];
-          } catch {}
+          } catch { }
         }
 
         const completeness = calculateCompleteness();
@@ -1592,7 +1682,7 @@ function CasePage() {
                 <p className="text-xs text-muted-foreground italic font-mono">// No attachments found.</p>
               )}
             </div>
-            
+
             {editLocked && (
               <div className="flex justify-end pt-4">
                 <Button
@@ -1647,7 +1737,7 @@ function CasePage() {
                     selectedAnswer: selected,
                   });
                 }
-              } catch {}
+              } catch { }
             }
           }
         }
@@ -1741,7 +1831,7 @@ function CasePage() {
               <div className="space-y-4 relative pl-6 border-l-2 border-border/40 ml-3">
                 {interactiveSteps.map((step, idx) => {
                   const isCurrent = !step.selectedAnswer;
-                  
+
                   let displayAns = step.selectedAnswer;
                   if (displayAns.startsWith("I select cause-")) {
                     displayAns = displayAns.substring(displayAns.indexOf(":") + 1).trim();
@@ -1756,11 +1846,10 @@ function CasePage() {
 
                   return (
                     <div key={idx} className="relative group">
-                      <div className={`absolute -left-[31px] top-1.5 w-4 h-4 rounded-full border-2 bg-background flex items-center justify-center transition-all ${
-                        isCurrent 
-                          ? "border-primary scale-110 shadow-[0_0_8px_rgba(251,191,36,0.5)]" 
+                      <div className={`absolute -left-[31px] top-1.5 w-4 h-4 rounded-full border-2 bg-background flex items-center justify-center transition-all ${isCurrent
+                          ? "border-primary scale-110 shadow-[0_0_8px_rgba(251,191,36,0.5)]"
                           : "border-emerald-500 bg-emerald-500/10"
-                      }`}>
+                        }`}>
                         {isCurrent ? (
                           <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
                         ) : (
@@ -1768,15 +1857,13 @@ function CasePage() {
                         )}
                       </div>
 
-                      <div className={`p-4 rounded-lg border transition-all duration-300 ${
-                        isCurrent
+                      <div className={`p-4 rounded-lg border transition-all duration-300 ${isCurrent
                           ? "bg-secondary/40 border-primary/40 shadow-sm"
                           : "bg-secondary/20 border-border/40"
-                      }`}>
+                        }`}>
                         <div className="flex items-center gap-2 mb-2">
-                          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                            isCurrent ? "bg-primary/20 text-primary" : "bg-emerald-500/10 text-emerald-400"
-                          }`}>
+                          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${isCurrent ? "bg-primary/20 text-primary" : "bg-emerald-500/10 text-emerald-400"
+                            }`}>
                             WHY STEP {step.stepNumber}
                           </span>
                           {step.isStreaming && (
@@ -1834,15 +1921,13 @@ function CasePage() {
                                             setSelectedCauseId(cause.id);
                                             setCustomCauseText("");
                                           }}
-                                          className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${
-                                            isSelected
+                                          className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected
                                               ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                               : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
-                                          }`}
+                                            }`}
                                         >
-                                          <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-                                            isSelected ? "border-primary" : "border-muted-foreground/30"
-                                          }`}>
+                                          <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary" : "border-muted-foreground/30"
+                                            }`}>
                                             {isSelected && <div className="w-2 h-2 rounded-full bg-primary" />}
                                           </div>
                                           <div className="flex-1 space-y-1">
@@ -1863,15 +1948,13 @@ function CasePage() {
                                       onClick={() => {
                                         setSelectedCauseId("custom");
                                       }}
-                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${
-                                        selectedCauseId === "custom"
+                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${selectedCauseId === "custom"
                                           ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                           : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
-                                      }`}
+                                        }`}
                                     >
-                                      <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${
-                                        selectedCauseId === "custom" ? "border-primary" : "border-muted-foreground/30"
-                                      }`}>
+                                      <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseId === "custom" ? "border-primary" : "border-muted-foreground/30"
+                                        }`}>
                                         {selectedCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-primary" />}
                                       </div>
                                       <div className="flex-1 space-y-1">
@@ -1919,14 +2002,14 @@ function CasePage() {
                               </div>
                             )}
 
-                             {step.possibleCauses && step.possibleCauses.length > 0 && (
-                               <div className="flex justify-end pt-2">
-                                 <Button
-                                   variant="default"
-                                   disabled={sendMut.isPending || step.isStreaming || (!selectedCauseId && !customCauseText.trim())}
-                                   onClick={submitResponse}
-                                   className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
-                                 >
+                            {step.possibleCauses && step.possibleCauses.length > 0 && (
+                              <div className="flex justify-end pt-2">
+                                <Button
+                                  variant="default"
+                                  disabled={sendMut.isPending || step.isStreaming || (!selectedCauseId && !customCauseText.trim())}
+                                  onClick={submitResponse}
+                                  className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
+                                >
                                   {sendMut.isPending ? (
                                     <>
                                       <Loader2 className="w-4 h-4 animate-spin" /> Submitting...
@@ -2138,7 +2221,7 @@ function CasePage() {
                   into each category interactively, and finalize with weighted scores.
                 </p>
                 <div className="flex flex-wrap gap-2 justify-center pt-1">
-                  {["Manpower","Machine","Methods","Materials","Measurements","Environment"].map(cat => (
+                  {["Manpower", "Machine", "Methods", "Materials", "Measurements", "Environment"].map(cat => (
                     <span key={cat} className="text-[10px] font-mono px-2 py-0.5 rounded bg-primary/10 text-primary border border-primary/20">{cat}</span>
                   ))}
                 </div>
@@ -2191,7 +2274,7 @@ function CasePage() {
             try {
               const sp = parseMaybeJson(streamingText);
               if (sp && sp.step) { derivedData = sp; }
-            } catch {}
+            } catch { }
           }
           if (!derivedData) {
             for (let i = messages.length - 1; i >= 0; i--) {
@@ -2200,7 +2283,7 @@ function CasePage() {
                 try {
                   const p = parseMaybeJson(m.content);
                   if (p && p.step) { derivedData = p; break; }
-                } catch {}
+                } catch { }
               }
             }
           }
@@ -2246,7 +2329,7 @@ function CasePage() {
                       {/* AI Side */}
                       <div className="bg-secondary/15 border border-border/40 rounded-xl p-5 space-y-3">
                         <span className="text-[10px] text-primary font-bold mono block">// STEP {h.step} ANALYSIS: {h.type.toUpperCase().replace("_", " ")}</span>
-                        
+
                         {h.type === "problem_confirm" && (
                           <div className="text-xs space-y-1">
                             <span className="text-muted-foreground block font-mono">PROPOSED PROBLEM STATEMENT</span>
@@ -2285,11 +2368,10 @@ function CasePage() {
                                         <p className="font-semibold text-foreground">{rc.cause}</p>
                                         {rc.subCauses?.length > 0 && <p className="text-[10px] text-muted-foreground">Sub-causes: {rc.subCauses.join(", ")}</p>}
                                       </div>
-                                      <Badge variant="outline" className={`text-[9px] font-mono uppercase ${
-                                        rc.status === "confirmed" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
-                                        rc.status === "refuted" ? "bg-red-500/10 text-red-400 border-red-500/20" :
-                                        "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                                      }`}>{rc.status}</Badge>
+                                      <Badge variant="outline" className={`text-[9px] font-mono uppercase ${rc.status === "confirmed" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                                          rc.status === "refuted" ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                                            "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                        }`}>{rc.status}</Badge>
                                     </div>
                                   ))}
                                 </div>
@@ -2334,7 +2416,7 @@ function CasePage() {
               {/* Active Step Panel */}
               <div className="bg-secondary/20 border border-primary/30 rounded-xl p-5 space-y-4 shadow-lg shadow-primary/5">
                 <span className="text-xs text-primary font-bold mono block animate-pulse">● ACTIVE STEP {currentStepNum}: {currentStepType.toUpperCase().replace("_", " ")}</span>
-                
+
                 {currentStepType === "problem_confirm" && (
                   <div className="text-xs space-y-2">
                     <span className="text-muted-foreground font-mono">PROPOSED PROBLEM STATEMENT:</span>
@@ -2528,352 +2610,348 @@ function CasePage() {
                     .map((h) => h);
 
                   return (
-                  <div className="space-y-4">
-                    {/* Category Progress Bar */}
-                    <div className="bg-secondary/30 border border-border/50 rounded-xl p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <Badge className="bg-primary/20 text-primary border-primary/30 uppercase text-xs font-mono px-3 py-1">
-                            Verifying: {currentStepData.activeCategory}
-                          </Badge>
+                    <div className="space-y-4">
+                      {/* Category Progress Bar */}
+                      <div className="bg-secondary/30 border border-border/50 rounded-xl p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <Badge className="bg-primary/20 text-primary border-primary/30 uppercase text-xs font-mono px-3 py-1">
+                              Verifying: {currentStepData.activeCategory}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <ChevronLeft
+                              className="w-4 h-4 cursor-pointer hover:text-primary transition-colors"
+                              onClick={() => {
+                                // Go to previous completed drill-down
+                                if (completedDrills.length > 0) {
+                                  setViewingPastFishboneStep(viewingPastFishboneStep === completedDrills.length - 1
+                                    ? (completedDrills.length > 1 ? completedDrills.length - 2 : null)
+                                    : (viewingPastFishboneStep !== null ? viewingPastFishboneStep + 1 : 0)
+                                  );
+                                }
+                              }}
+                            />
+                            <span className="text-xs text-muted-foreground font-mono">
+                              {completedDrills.length} prior step{completedDrills.length !== 1 ? 's' : ''} reviewed
+                            </span>
+                            <ChevronRight
+                              className="w-4 h-4 cursor-pointer hover:text-primary transition-colors"
+                              onClick={() => {
+                                if (completedDrills.length > 0) {
+                                  setViewingPastFishboneStep(viewingPastFishboneStep !== null
+                                    ? (viewingPastFishboneStep < completedDrills.length - 1 ? viewingPastFishboneStep + 1 : 0)
+                                    : 0
+                                  );
+                                }
+                              }}
+                            />
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <ChevronLeft
-                            className="w-4 h-4 cursor-pointer hover:text-primary transition-colors"
-                            onClick={() => {
-                              // Go to previous completed drill-down
-                              if (completedDrills.length > 0) {
-                                setViewingPastFishboneStep(viewingPastFishboneStep === completedDrills.length - 1 
-                                  ? (completedDrills.length > 1 ? completedDrills.length - 2 : null)
-                                  : (viewingPastFishboneStep !== null ? viewingPastFishboneStep + 1 : 0)
-                                );
-                              }
-                            }}
-                          />
-                          <span className="text-xs text-muted-foreground font-mono">
-                            {completedDrills.length} prior step{completedDrills.length !== 1 ? 's' : ''} reviewed
-                          </span>
-                          <ChevronRight
-                            className="w-4 h-4 cursor-pointer hover:text-primary transition-colors"
-                            onClick={() => {
-                              if (completedDrills.length > 0) {
-                                setViewingPastFishboneStep(viewingPastFishboneStep !== null 
-                                  ? (viewingPastFishboneStep < completedDrills.length - 1 ? viewingPastFishboneStep + 1 : 0)
-                                  : 0
-                                );
-                              }
-                            }}
-                          />
-                        </div>
-                      </div>
-                      
-                      {/* Completed/Pending Categories Pills */}
-                      <div className="flex flex-wrap gap-2">
-                        {currentStepData.completedCategories?.map((cat: string, i: number) => (
-                          <Badge
-                            key={cat}
-                            className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-xs px-3 py-1 font-mono"
-                          >
-                            ✓ {cat}
-                          </Badge>
-                        ))}
-                        <Badge className="bg-primary/20 text-primary border-primary/40 text-xs px-3 py-1 font-mono animate-pulse">
-                          ● {currentStepData.activeCategory}
-                        </Badge>
-                        {currentStepData.pendingCategories?.map((cat: string) => (
-                          <Badge
-                            key={cat}
-                            variant="outline"
-                            className="text-muted-foreground/60 text-xs px-3 py-1 font-mono"
-                          >
-                            ○ {cat}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
 
-                    {/* Past Step Review Panel */}
-                    {viewingPastFishboneStep !== null && completedDrills[viewingPastFishboneStep] && (() => {
-                      const past = completedDrills[viewingPastFishboneStep].aiData;
-                      return (
-                        <div className="bg-background/80 border-2 border-border/50 rounded-xl p-5 space-y-4">
-                          <div className="flex items-center justify-between border-b border-border/40 pb-3">
-                            <div className="flex items-center gap-2">
-                              <Badge className="bg-muted text-muted-foreground border-border text-xs font-mono px-3 py-1">
-                                STEP {completedDrills[viewingPastFishboneStep].step} — REVIEW ONLY
-                              </Badge>
-                              <span className="text-sm font-bold text-primary uppercase">{past.activeCategory}</span>
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 text-xs"
-                              onClick={() => setViewingPastFishboneStep(null)}
+                        {/* Completed/Pending Categories Pills */}
+                        <div className="flex flex-wrap gap-2">
+                          {currentStepData.completedCategories?.map((cat: string, i: number) => (
+                            <Badge
+                              key={cat}
+                              className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 text-xs px-3 py-1 font-mono"
                             >
-                              ✕ Close Review
-                            </Button>
+                              ✓ {cat}
+                            </Badge>
+                          ))}
+                          <Badge className="bg-primary/20 text-primary border-primary/40 text-xs px-3 py-1 font-mono animate-pulse">
+                            ● {currentStepData.activeCategory}
+                          </Badge>
+                          {currentStepData.pendingCategories?.map((cat: string) => (
+                            <Badge
+                              key={cat}
+                              variant="outline"
+                              className="text-muted-foreground/60 text-xs px-3 py-1 font-mono"
+                            >
+                              ○ {cat}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Past Step Review Panel */}
+                      {viewingPastFishboneStep !== null && completedDrills[viewingPastFishboneStep] && (() => {
+                        const past = completedDrills[viewingPastFishboneStep].aiData;
+                        return (
+                          <div className="bg-background/80 border-2 border-border/50 rounded-xl p-5 space-y-4">
+                            <div className="flex items-center justify-between border-b border-border/40 pb-3">
+                              <div className="flex items-center gap-2">
+                                <Badge className="bg-muted text-muted-foreground border-border text-xs font-mono px-3 py-1">
+                                  STEP {completedDrills[viewingPastFishboneStep].step} — REVIEW ONLY
+                                </Badge>
+                                <span className="text-sm font-bold text-primary uppercase">{past.activeCategory}</span>
+                              </div>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 text-xs"
+                                onClick={() => setViewingPastFishboneStep(null)}
+                              >
+                                ✕ Close Review
+                              </Button>
+                            </div>
+                            <div className="space-y-3">
+                              {past.refinedCauses?.map((rc: any, rcIdx: number) => (
+                                <div key={rcIdx} className="p-4 border border-border/40 rounded-lg bg-secondary/10">
+                                  <div className="flex items-start justify-between gap-3 mb-2">
+                                    <p className="font-semibold text-sm text-foreground">{rc.cause}</p>
+                                    <Badge className={`text-xs font-mono px-2.5 py-0.5 ${rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
+                                        rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                          "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                                      }`}>
+                                      {rc.status}
+                                    </Badge>
+                                  </div>
+                                  {rc.subCauses?.length > 0 && (
+                                    <ul className="space-y-2 ml-1">
+                                      {rc.subCauses.map((sc: string, si: number) => (
+                                        <li key={si} className="flex items-start gap-2 text-sm text-muted-foreground">
+                                          <span className="text-primary/60 mt-1.5 shrink-0">•</span>
+                                          <span className="leading-relaxed">{sc}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            {past.operatorInstruction && (
+                              <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4 text-sm text-blue-400 font-mono">
+                                <span className="font-bold text-xs uppercase tracking-wider block mb-1.5">● Instruction Given:</span>
+                                {past.operatorInstruction}
+                              </div>
+                            )}
+                            {past.question && (
+                              <div className="bg-secondary/20 border border-border/40 rounded-lg p-4 text-sm text-foreground">
+                                <span className="font-bold text-xs uppercase tracking-wider text-muted-foreground block mb-1.5">● Agent Question:</span>
+                                {past.question}
+                              </div>
+                            )}
+                            <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 text-sm">
+                              <span className="font-bold text-xs uppercase tracking-wider text-primary block mb-1">● Your Response:</span>
+                              <p className="text-muted-foreground leading-relaxed">{completedDrills[viewingPastFishboneStep].operatorResponse}</p>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Current Category Title */}
+                      {viewingPastFishboneStep === null && (
+                        <div className="flex items-center gap-3">
+                          <h4 className="text-base font-bold text-foreground uppercase tracking-wide">
+                            Causes for: {currentStepData.activeCategory}
+                          </h4>
+                        </div>
+                      )}
+
+                      {/* Current Causes — Editable */}
+                      {viewingPastFishboneStep === null && currentStepData.refinedCauses && (
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">Cause List</span>
+                            <span className="text-xs text-primary font-mono bg-primary/10 px-3 py-1 rounded-full border border-primary/20">
+                              Edit causes inline · Set status to approve
+                            </span>
                           </div>
                           <div className="space-y-3">
-                            {past.refinedCauses?.map((rc: any, rcIdx: number) => (
-                              <div key={rcIdx} className="p-4 border border-border/40 rounded-lg bg-secondary/10">
-                                <div className="flex items-start justify-between gap-3 mb-2">
-                                  <p className="font-semibold text-sm text-foreground">{rc.cause}</p>
-                                  <Badge className={`text-xs font-mono px-2.5 py-0.5 ${
-                                    rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                    rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                    "bg-amber-500/20 text-amber-400 border-amber-500/40"
-                                  }`}>
-                                    {rc.status}
-                                  </Badge>
-                                </div>
-                                {rc.subCauses?.length > 0 && (
-                                  <ul className="space-y-2 ml-1">
-                                    {rc.subCauses.map((sc: string, si: number) => (
-                                      <li key={si} className="flex items-start gap-2 text-sm text-muted-foreground">
-                                        <span className="text-primary/60 mt-1.5 shrink-0">•</span>
-                                        <span className="leading-relaxed">{sc}</span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                          {past.operatorInstruction && (
-                            <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-4 text-sm text-blue-400 font-mono">
-                              <span className="font-bold text-xs uppercase tracking-wider block mb-1.5">● Instruction Given:</span>
-                              {past.operatorInstruction}
-                            </div>
-                          )}
-                          {past.question && (
-                            <div className="bg-secondary/20 border border-border/40 rounded-lg p-4 text-sm text-foreground">
-                              <span className="font-bold text-xs uppercase tracking-wider text-muted-foreground block mb-1.5">● Agent Question:</span>
-                              {past.question}
-                            </div>
-                          )}
-                          <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 text-sm">
-                            <span className="font-bold text-xs uppercase tracking-wider text-primary block mb-1">● Your Response:</span>
-                            <p className="text-muted-foreground leading-relaxed">{completedDrills[viewingPastFishboneStep].operatorResponse}</p>
-                          </div>
-                        </div>
-                      );
-                    })()}
-
-                    {/* Current Category Title */}
-                    {viewingPastFishboneStep === null && (
-                      <div className="flex items-center gap-3">
-                        <h4 className="text-base font-bold text-foreground uppercase tracking-wide">
-                          Causes for: {currentStepData.activeCategory}
-                        </h4>
-                      </div>
-                    )}
-
-                    {/* Current Causes — Editable */}
-                    {viewingPastFishboneStep === null && currentStepData.refinedCauses && (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider">Cause List</span>
-                          <span className="text-xs text-primary font-mono bg-primary/10 px-3 py-1 rounded-full border border-primary/20">
-                            Edit causes inline · Set status to approve
-                          </span>
-                        </div>
-                        <div className="space-y-3">
-                          {currentStepData.refinedCauses.map((rc: any, rcIdx: number) => (
-                            <div key={rcIdx} className="p-5 border-2 border-border/50 rounded-xl bg-background/70 space-y-4 hover:border-primary/30 transition-all">
-                              {/* Cause Name + Status Row */}
-                              <div className="flex items-start gap-3">
-                                <input
-                                  type="text"
-                                  value={rc.cause}
-                                  onChange={(e) => {
-                                    const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
-                                      i === rcIdx ? { ...c, cause: e.target.value } : c
-                                    );
-                                    const next = { ...currentStepData, refinedCauses: updated };
-                                    setFishboneStep({ ...fishboneStep!, data: next });
-                                    setIsDirty(true);
-                                  }}
-                                  onBlur={() => {
-                                    saveInteractiveStepMut.mutate(currentStepData);
-                                  }}
-                                  className="flex-1 bg-transparent border border-border/30 rounded-lg p-3 text-sm font-semibold text-foreground focus:border-primary focus:ring-1 focus:ring-primary/20 focus:outline-none transition-all"
-                                  placeholder="Cause description..."
-                                />
-                                <div className="flex flex-col items-center gap-1 shrink-0">
-                                  <select
-                                    value={rc.status}
+                            {currentStepData.refinedCauses.map((rc: any, rcIdx: number) => (
+                              <div key={rcIdx} className="p-5 border-2 border-border/50 rounded-xl bg-background/70 space-y-4 hover:border-primary/30 transition-all">
+                                {/* Cause Name + Status Row */}
+                                <div className="flex items-start gap-3">
+                                  <input
+                                    type="text"
+                                    value={rc.cause}
                                     onChange={(e) => {
                                       const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
-                                        i === rcIdx ? { ...c, status: e.target.value } : c
+                                        i === rcIdx ? { ...c, cause: e.target.value } : c
+                                      );
+                                      const next = { ...currentStepData, refinedCauses: updated };
+                                      setFishboneStep({ ...fishboneStep!, data: next });
+                                      setIsDirty(true);
+                                    }}
+                                    onBlur={() => {
+                                      saveInteractiveStepMut.mutate(currentStepData);
+                                    }}
+                                    className="flex-1 bg-transparent border border-border/30 rounded-lg p-3 text-sm font-semibold text-foreground focus:border-primary focus:ring-1 focus:ring-primary/20 focus:outline-none transition-all"
+                                    placeholder="Cause description..."
+                                  />
+                                  <div className="flex flex-col items-center gap-1 shrink-0">
+                                    <select
+                                      value={rc.status}
+                                      onChange={(e) => {
+                                        const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
+                                          i === rcIdx ? { ...c, status: e.target.value } : c
+                                        );
+                                        const next = { ...currentStepData, refinedCauses: updated };
+                                        setFishboneStep({ ...fishboneStep!, data: next });
+                                        setIsDirty(true);
+                                        saveInteractiveStepMut.mutate(next);
+                                        toast.success(`Cause ${e.target.value}`);
+                                      }}
+                                      className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
+                                          rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                            "bg-amber-500/20 text-amber-400 border-amber-500/20"
+                                        }`}
+                                    >
+                                      <option value="pending">⏳ Pending</option>
+                                      <option value="confirmed">✓ Confirmed</option>
+                                      <option value="refuted">✕ Refuted</option>
+                                      <option value="pending_verification">⏳ Pending Verify</option>
+                                    </select>
+                                  </div>
+                                </div>
+
+                                {/* Sub-causes as bullet list */}
+                                {rc.subCauses?.length > 0 && (
+                                  <div className="ml-2 bg-secondary/20 border border-border/30 rounded-lg p-4">
+                                    <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider block mb-2">
+                                      Sub-Causes ({rc.subCauses.length})
+                                    </span>
+                                    <ul className="space-y-2.5">
+                                      {rc.subCauses.map((sc: string, si: number) => (
+                                        <li key={si} className="flex items-start gap-3 text-sm leading-relaxed">
+                                          <span className="text-primary/60 mt-1.5 shrink-0 w-1.5 h-1.5 rounded-full bg-primary/60" />
+                                          <span className="text-muted-foreground flex-1">{sc}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+
+                                {/* Action Buttons */}
+                                <div className="flex gap-2 pt-1 border-t border-border/20">
+                                  <button
+                                    onClick={() => {
+                                      const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
+                                        i === rcIdx ? { ...c, status: "confirmed" } : c
                                       );
                                       const next = { ...currentStepData, refinedCauses: updated };
                                       setFishboneStep({ ...fishboneStep!, data: next });
                                       setIsDirty(true);
                                       saveInteractiveStepMut.mutate(next);
-                                      toast.success(`Cause ${e.target.value}`);
+                                      toast.success("Cause confirmed ✓");
                                     }}
-                                    className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${
-                                      rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                      rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                      "bg-amber-500/20 text-amber-400 border-amber-500/20"
-                                    }`}
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${rc.status === "confirmed"
+                                        ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                                        : rc.status === "refuted"
+                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                          : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
+                                      }`}
+                                    disabled={rc.status === "refuted"}
                                   >
-                                    <option value="pending">⏳ Pending</option>
-                                    <option value="confirmed">✓ Confirmed</option>
-                                    <option value="refuted">✕ Refuted</option>
-                                    <option value="pending_verification">⏳ Pending Verify</option>
-                                  </select>
+                                    {rc.status === "confirmed" ? "✓ Confirmed" : "✓ Confirm"}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
+                                        i === rcIdx ? { ...c, status: "refuted" } : c
+                                      );
+                                      const next = { ...currentStepData, refinedCauses: updated };
+                                      setFishboneStep({ ...fishboneStep!, data: next });
+                                      setIsDirty(true);
+                                      saveInteractiveStepMut.mutate(next);
+                                      toast.info("Cause refuted");
+                                    }}
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${rc.status === "refuted"
+                                        ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
+                                        : rc.status === "confirmed"
+                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                          : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
+                                      }`}
+                                    disabled={rc.status === "confirmed"}
+                                  >
+                                    {rc.status === "refuted" ? "✕ Refuted" : "✕ Refute"}
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      const updated = currentStepData.refinedCauses.filter((_: any, i: number) => i !== rcIdx);
+                                      const next = { ...currentStepData, refinedCauses: updated };
+                                      setFishboneStep({ ...fishboneStep!, data: next });
+                                      setIsDirty(true);
+                                      saveInteractiveStepMut.mutate(next);
+                                      toast.info("Cause removed");
+                                    }}
+                                    className="text-sm px-4 py-2 rounded-lg bg-muted/80 text-muted-foreground border border-border hover:bg-secondary transition-all font-mono"
+                                  >
+                                    Remove
+                                  </button>
                                 </div>
                               </div>
+                            ))}
 
-                              {/* Sub-causes as bullet list */}
-                              {rc.subCauses?.length > 0 && (
-                                <div className="ml-2 bg-secondary/20 border border-border/30 rounded-lg p-4">
-                                  <span className="text-xs text-muted-foreground font-mono uppercase tracking-wider block mb-2">
-                                    Sub-Causes ({rc.subCauses.length})
-                                  </span>
-                                  <ul className="space-y-2.5">
-                                    {rc.subCauses.map((sc: string, si: number) => (
-                                      <li key={si} className="flex items-start gap-3 text-sm leading-relaxed">
-                                        <span className="text-primary/60 mt-1.5 shrink-0 w-1.5 h-1.5 rounded-full bg-primary/60" />
-                                        <span className="text-muted-foreground flex-1">{sc}</span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-
-                              {/* Action Buttons */}
-                              <div className="flex gap-2 pt-1 border-t border-border/20">
-                                <button
-                                  onClick={() => {
-                                    const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
-                                      i === rcIdx ? { ...c, status: "confirmed" } : c
-                                    );
-                                    const next = { ...currentStepData, refinedCauses: updated };
-                                    setFishboneStep({ ...fishboneStep!, data: next });
-                                    setIsDirty(true);
-                                    saveInteractiveStepMut.mutate(next);
-                                    toast.success("Cause confirmed ✓");
-                                  }}
-                                  className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
-                                    rc.status === "confirmed"
-                                      ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
-                                      : rc.status === "refuted"
-                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                        : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
-                                  }`}
-                                  disabled={rc.status === "refuted"}
-                                >
-                                  {rc.status === "confirmed" ? "✓ Confirmed" : "✓ Confirm"}
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    const updated = currentStepData.refinedCauses.map((c: any, i: number) =>
-                                      i === rcIdx ? { ...c, status: "refuted" } : c
-                                    );
-                                    const next = { ...currentStepData, refinedCauses: updated };
-                                    setFishboneStep({ ...fishboneStep!, data: next });
-                                    setIsDirty(true);
-                                    saveInteractiveStepMut.mutate(next);
-                                    toast.info("Cause refuted");
-                                  }}
-                                  className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
-                                    rc.status === "refuted"
-                                      ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
-                                      : rc.status === "confirmed"
-                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                        : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
-                                  }`}
-                                  disabled={rc.status === "confirmed"}
-                                >
-                                  {rc.status === "refuted" ? "✕ Refuted" : "✕ Refute"}
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    const updated = currentStepData.refinedCauses.filter((_: any, i: number) => i !== rcIdx);
-                                    const next = { ...currentStepData, refinedCauses: updated };
-                                    setFishboneStep({ ...fishboneStep!, data: next });
-                                    setIsDirty(true);
-                                    saveInteractiveStepMut.mutate(next);
-                                    toast.info("Cause removed");
-                                  }}
-                                  className="text-sm px-4 py-2 rounded-lg bg-muted/80 text-muted-foreground border border-border hover:bg-secondary transition-all font-mono"
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-
-                          {/* Add new cause button */}
-                          <button
-                            onClick={() => {
-                              const newCause = { cause: "New cause", subCauses: [], status: "pending" };
-                              const updated = [...(currentStepData.refinedCauses || []), newCause];
-                              const next = { ...currentStepData, refinedCauses: updated };
-                              setFishboneStep({ ...fishboneStep!, data: next });
-                              setIsDirty(true);
-                              saveInteractiveStepMut.mutate(next);
-                            }}
-                            className="w-full text-sm text-primary/80 hover:text-primary py-4 font-mono flex items-center justify-center gap-2 transition-all border-2 border-dashed border-border/40 rounded-xl hover:border-primary/30"
-                          >
-                            <Plus className="w-4 h-4" /> Add Cause to Category
-                          </button>
+                            {/* Add new cause button */}
+                            <button
+                              onClick={() => {
+                                const newCause = { cause: "New cause", subCauses: [], status: "pending" };
+                                const updated = [...(currentStepData.refinedCauses || []), newCause];
+                                const next = { ...currentStepData, refinedCauses: updated };
+                                setFishboneStep({ ...fishboneStep!, data: next });
+                                setIsDirty(true);
+                                saveInteractiveStepMut.mutate(next);
+                              }}
+                              className="w-full text-sm text-primary/80 hover:text-primary py-4 font-mono flex items-center justify-center gap-2 transition-all border-2 border-dashed border-border/40 rounded-xl hover:border-primary/30"
+                            >
+                              <Plus className="w-4 h-4" /> Add Cause to Category
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {/* Agent Question */}
-                    {viewingPastFishboneStep === null && currentStepData.question && (
-                      <div className="bg-primary/5 border-2 border-primary/20 rounded-xl p-5">
-                        <span className="font-bold text-xs uppercase tracking-wider text-primary block mb-2">● Agent Verification Question</span>
-                        <p className="text-sm text-foreground leading-relaxed">{currentStepData.question}</p>
-                      </div>
-                    )}
+                      {/* Agent Question */}
+                      {viewingPastFishboneStep === null && currentStepData.question && (
+                        <div className="bg-primary/5 border-2 border-primary/20 rounded-xl p-5">
+                          <span className="font-bold text-xs uppercase tracking-wider text-primary block mb-2">● Agent Verification Question</span>
+                          <p className="text-sm text-foreground leading-relaxed">{currentStepData.question}</p>
+                        </div>
+                      )}
 
-                    {/* Operator Instruction */}
-                    {viewingPastFishboneStep === null && currentStepData.operatorInstruction && (
-                      <div className="bg-blue-500/5 border-2 border-blue-500/20 rounded-xl p-5 text-sm text-blue-400 font-mono">
-                        <span className="font-bold text-xs uppercase tracking-wider block mb-2">● Required Action</span>
-                        {currentStepData.operatorInstruction}
-                      </div>
-                    )}
-                    {/* Approve button for current step  */}
-                    {viewingPastFishboneStep === null && (
-                      <div className="flex gap-3 pt-3 border-t-2 border-border/40">
-                        <Button
-                          onClick={() => {
-                            const lines = [`Drill-down review for ${currentStepData.activeCategory} complete. Status updates:`];
-                            if (currentStepData.refinedCauses) {
-                              currentStepData.refinedCauses.forEach((rc: any) => {
-                                lines.push(`- ${rc.cause}: ${rc.status}`);
-                              });
-                            }
-                            lines.push("Proceed to next drill-down or scoring review.");
-                            const msg = selectedFishboneAnswer.trim() 
-                              ? `${lines.join("\n")}\n\nAdditional notes: ${selectedFishboneAnswer}` 
-                              : lines.join("\n");
-                            submitFishboneResponse(msg);
-                          }}
-                          disabled={sendMut.isPending}
-                          className="text-sm px-6 py-3 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-                        >
-                          <CheckCircle2 className="w-4 h-4 mr-2" />
-                          Approve Causes & Proceed
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => submitFishboneResponse(`Skip ${currentStepData.activeCategory} and proceed.`)}
-                          disabled={sendMut.isPending}
-                          className="text-sm px-4 py-3"
-                        >
-                          Skip This Category
-                        </Button>
-                      </div>
-                    )}
-                  </div>
+                      {/* Operator Instruction */}
+                      {viewingPastFishboneStep === null && currentStepData.operatorInstruction && (
+                        <div className="bg-blue-500/5 border-2 border-blue-500/20 rounded-xl p-5 text-sm text-blue-400 font-mono">
+                          <span className="font-bold text-xs uppercase tracking-wider block mb-2">● Required Action</span>
+                          {currentStepData.operatorInstruction}
+                        </div>
+                      )}
+                      {/* Approve button for current step  */}
+                      {viewingPastFishboneStep === null && (
+                        <div className="flex gap-3 pt-3 border-t-2 border-border/40">
+                          <Button
+                            onClick={() => {
+                              const lines = [`Drill-down review for ${currentStepData.activeCategory} complete. Status updates:`];
+                              if (currentStepData.refinedCauses) {
+                                currentStepData.refinedCauses.forEach((rc: any) => {
+                                  lines.push(`- ${rc.cause}: ${rc.status}`);
+                                });
+                              }
+                              lines.push("Proceed to next drill-down or scoring review.");
+                              const msg = selectedFishboneAnswer.trim()
+                                ? `${lines.join("\n")}\n\nAdditional notes: ${selectedFishboneAnswer}`
+                                : lines.join("\n");
+                              submitFishboneResponse(msg);
+                            }}
+                            disabled={sendMut.isPending}
+                            className="text-sm px-6 py-3 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
+                          >
+                            <CheckCircle2 className="w-4 h-4 mr-2" />
+                            Approve Causes & Proceed
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => submitFishboneResponse(`Skip ${currentStepData.activeCategory} and proceed.`)}
+                            disabled={sendMut.isPending}
+                            className="text-sm px-4 py-3"
+                          >
+                            Skip This Category
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   );
                 })()}
 
@@ -2913,11 +2991,10 @@ function CasePage() {
                                 key={cat}
                                 onClick={() => setActiveEditCat(cat)}
                                 type="button"
-                                className={`text-xs px-3 py-1 font-mono rounded-lg border transition-all ${
-                                  isSelected
+                                className={`text-xs px-3 py-1 font-mono rounded-lg border transition-all ${isSelected
                                     ? "bg-primary/20 text-primary border-primary/40 font-bold"
                                     : "bg-transparent text-muted-foreground border-border hover:bg-secondary"
-                                }`}
+                                  }`}
                               >
                                 {cat.toUpperCase()}
                               </button>
@@ -2953,7 +3030,7 @@ function CasePage() {
                               const updatedCats = { ...fishboneCategories, [activeEditCat]: updated };
                               setFishboneCategories(updatedCats);
                               setIsDirty(true);
-                              
+
                               const updatedStepData = { ...currentStepData, fishbone: updatedCats };
                               setFishboneStep({ ...fishboneStep!, data: updatedStepData });
                               saveInteractiveStepMut.mutate(updatedStepData);
@@ -2964,7 +3041,7 @@ function CasePage() {
                               const updatedCats = { ...fishboneCategories, [activeEditCat]: updated };
                               setFishboneCategories(updatedCats);
                               setIsDirty(true);
-                              
+
                               const updatedStepData = { ...currentStepData, fishbone: updatedCats };
                               setFishboneStep({ ...fishboneStep!, data: updatedStepData });
                               saveInteractiveStepMut.mutate(updatedStepData);
@@ -2984,11 +3061,10 @@ function CasePage() {
                                     <select
                                       value={status}
                                       onChange={(e) => updateCauseValue("status", e.target.value)}
-                                      className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${
-                                        status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                        status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                        "bg-amber-500/20 text-amber-400 border-amber-500/20"
-                                      }`}
+                                      className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
+                                          status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                            "bg-amber-500/20 text-amber-400 border-amber-500/20"
+                                        }`}
                                     >
                                       <option value="pending">⏳ Pending</option>
                                       <option value="confirmed">✓ Confirmed</option>
@@ -3002,13 +3078,12 @@ function CasePage() {
                                   <button
                                     onClick={() => updateCauseValue("status", "confirmed")}
                                     type="button"
-                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
-                                      status === "confirmed"
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${status === "confirmed"
                                         ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
                                         : status === "refuted"
                                           ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
                                           : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
-                                    }`}
+                                      }`}
                                     disabled={status === "refuted"}
                                   >
                                     {status === "confirmed" ? "✓ Confirmed" : "✓ Confirm"}
@@ -3016,13 +3091,12 @@ function CasePage() {
                                   <button
                                     onClick={() => updateCauseValue("status", "refuted")}
                                     type="button"
-                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${
-                                      status === "refuted"
+                                    className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${status === "refuted"
                                         ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
                                         : status === "confirmed"
                                           ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
                                           : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
-                                    }`}
+                                      }`}
                                     disabled={status === "confirmed"}
                                   >
                                     {status === "refuted" ? "✕ Refuted" : "✕ Refute"}
@@ -3045,7 +3119,7 @@ function CasePage() {
                               const updatedCats = { ...fishboneCategories, [activeEditCat]: [...causes, newCause] };
                               setFishboneCategories(updatedCats);
                               setIsDirty(true);
-                              
+
                               const updatedStepData = { ...currentStepData, fishbone: updatedCats };
                               setFishboneStep({ ...fishboneStep!, data: updatedStepData });
                               saveInteractiveStepMut.mutate(updatedStepData);
@@ -3093,7 +3167,7 @@ function CasePage() {
                     ) : (
                       <>
                         <p className="text-xs text-foreground font-bold leading-relaxed">{currentStepData.question || "Proposing next analysis step..."}</p>
-                        
+
                         <div className="flex gap-2 items-end">
                           <div className="flex-1">
                             <Textarea
@@ -3232,7 +3306,7 @@ function CasePage() {
                           const name = typeof c === "string" ? c : c.cause || "";
                           const likelihood = typeof c === "object" ? c.likelihood : "Medium";
                           const weight = typeof c === "object" ? (c.weight !== undefined ? c.weight : 50) : 50;
-                          
+
                           let heatColor = "border-emerald-500/40 bg-emerald-500/5 text-emerald-400";
                           if (weight > 30 && weight <= 70) heatColor = "border-amber-500/40 bg-amber-500/5 text-amber-400";
                           if (weight > 70) heatColor = "border-rose-500/40 bg-rose-500/5 text-rose-400";
@@ -3460,7 +3534,7 @@ function CasePage() {
         const computeCutSets = (node: any): string[][] => {
           if (!node) return [];
           if (node.type === "event") return [[node.label]];
-          
+
           const childCutSets = (node.children || []).map((c: any) => computeCutSets(c));
           if (childCutSets.length === 0) return [];
 
@@ -3691,11 +3765,10 @@ function CasePage() {
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-primary font-bold font-mono">{cs.cutSetId || `MCS-${i + 1}`}</span>
                         {cs.criticality && (
-                          <Badge className={`text-[9px] px-1.5 py-0 font-mono ${
-                            cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
-                            cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
-                            "bg-blue-500/20 text-blue-400 border-blue-500/30"
-                          }`}>{cs.criticality.toUpperCase()}</Badge>
+                          <Badge className={`text-[9px] px-1.5 py-0 font-mono ${cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
+                              cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
+                                "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                            }`}>{cs.criticality.toUpperCase()}</Badge>
                         )}
                         {cs.probability !== undefined && (
                           <span className="font-mono text-muted-foreground ml-auto text-[10px]">P: {(cs.probability * 100).toFixed(0)}%</span>
@@ -3826,7 +3899,7 @@ function CasePage() {
         );
       }
 
-       case "pareto": {
+      case "pareto": {
         // Use persisted state first (populated by useEffect when messages load),
         // then fall back to live inline parse from parsedData for streaming
         let byFailureMode: Array<{ mode: string; frequency: number }> = paretoFailureModes;
@@ -3844,10 +3917,10 @@ function CasePage() {
         }
 
         const sortedModes = [...byFailureMode].sort((a, b) => b.frequency - a.frequency);
-        
+
         let cumulativeSum = 0;
         const totalFreq = sortedModes.reduce((sum, item) => sum + (item.frequency || 0), 0);
-        
+
         const chartData = sortedModes.map((item, idx) => {
           cumulativeSum += item.frequency;
           const cumPercent = totalFreq > 0 ? parseFloat(((cumulativeSum / totalFreq) * 100).toFixed(1)) : 0;
@@ -3960,7 +4033,7 @@ function CasePage() {
             {/* Recharts Chart representation */}
             <div className="bg-secondary/20 border border-border/50 rounded-xl p-4">
               <span className="text-xs text-muted-foreground mono block mb-4">// COMPOSED FREQUENCY AND CUMULATIVE PERCENTAGE OVERLAY</span>
-              
+
               {paretoMode === "cluster" ? (
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
@@ -4057,7 +4130,7 @@ function CasePage() {
         );
       }
 
-       case "timeline": {
+      case "timeline": {
         let timeline: any = {};
         let dbPhases: any[] = [];
 
@@ -4156,7 +4229,7 @@ function CasePage() {
             {/* Gantt-style Horizontal Lanes representation */}
             <div className="bg-secondary/20 border border-border/50 rounded-xl p-6 overflow-x-auto relative">
               <span className="text-xs text-muted-foreground mono block mb-4">// HORIZONTAL GANTT SEQUENCE VIEW</span>
-              
+
               <div className="min-w-[700px] flex items-center gap-2 py-4">
                 {phases.map((phase: any, idx: number) => {
                   let colorClass = "from-emerald-600/30 to-emerald-500/20 border-emerald-500/40 text-emerald-400";
@@ -4303,7 +4376,7 @@ function CasePage() {
                           { label: "SHIFT", value: tec.incidentOverview.shift },
                           { label: "OPERATOR", value: tec.incidentOverview.operatorOnDuty },
                           { label: "ANALYST", value: tec.analyst },
-                        ] as {label: string; value: string | undefined}[]).filter((f) => f.value).map((f, i) => (
+                        ] as { label: string; value: string | undefined }[]).filter((f) => f.value).map((f, i) => (
                           <div key={i} className="space-y-0.5">
                             <span className="text-[9px] text-muted-foreground font-mono uppercase">{f.label}</span>
                             <p className="text-xs text-foreground font-medium">{f.value}</p>
@@ -4483,7 +4556,7 @@ function CasePage() {
                             { label: "ACKNOWLEDGMENT", value: tec.eventCorrelation.responseTimeAnalysis.acknowledgmentTime },
                             { label: "INTERVENTION", value: tec.eventCorrelation.responseTimeAnalysis.interventionTime },
                             { label: "TOTAL RESPONSE", value: tec.eventCorrelation.responseTimeAnalysis.totalResponseTime },
-                          ] as {label: string; value: string | undefined}[]).filter((f) => f.value).map((f, i) => (
+                          ] as { label: string; value: string | undefined }[]).filter((f) => f.value).map((f, i) => (
                             <div key={i} className="bg-secondary/20 rounded p-2">
                               <span className="text-[9px] text-muted-foreground font-mono uppercase">{f.label}</span>
                               <p className="text-xs font-medium text-foreground mt-0.5">{f.value}</p>
@@ -4723,7 +4796,7 @@ function CasePage() {
                   { key: "controller", name: "Flow Controller Logic Loop", health: "WARNING (JITTER)", desc: "Software regulator checking stream velocities." }
                 ].map((item) => {
                   const score = equipmentRPN[item.key] || 25;
-                  
+
                   let scoreColor = "text-emerald-400";
                   if (score > 35 && score <= 70) scoreColor = "text-amber-400";
                   if (score > 70) scoreColor = "text-rose-500 font-bold";
@@ -4732,18 +4805,17 @@ function CasePage() {
                     <div key={item.key} className="bg-background border border-border rounded-xl p-4 space-y-3">
                       <div className="flex justify-between items-center">
                         <span className="font-semibold text-xs text-foreground truncate w-[160px]">{item.name}</span>
-                        <Badge className={`text-[8px] font-mono ${
-                          item.health === "NOMINAL" 
-                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30" 
-                            : item.health.includes("FAULT") 
-                              ? "bg-rose-500/10 text-rose-400 border-rose-500/30" 
+                        <Badge className={`text-[8px] font-mono ${item.health === "NOMINAL"
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                            : item.health.includes("FAULT")
+                              ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
                               : "bg-amber-500/10 text-amber-400 border-amber-500/30"
-                        }`}>
+                          }`}>
                           {item.health}
                         </Badge>
                       </div>
                       <p className="text-[10px] text-muted-foreground">{item.desc}</p>
-                      
+
                       <div className="pt-2 border-t border-border/20 space-y-2">
                         <div className="flex justify-between text-[10px] font-mono">
                           <span>RPN Risk Score:</span>
@@ -4776,7 +4848,7 @@ function CasePage() {
         );
       }
 
-       case "report": {
+      case "report": {
         // ── Normalize current report agent payload ──
         let reportPayload: any = parsedData || {};
         if (parsedData?.rcaReport) {
@@ -4801,24 +4873,22 @@ function CasePage() {
         const cLoading = combinedQ.isLoading;
 
         const col = cd?.collector || {};
-        const fbRaw = cd?.fishbone || {};
-        const fbCats: Record<string, any[]> = fbRaw.fishbone || fbRaw.categories || {};
-        const ftRaw = cd?.faultTree || {};
-        const paRaw = cd?.pareto || {};
-        const paretoItems: Array<{mode:string;frequency:number}> = paRaw.paretoAnalysis?.byFailureMode || paRaw.byFailureMode || [];
-        const tlRaw = cd?.timeline || {};
-        const tlPhases: any[] = tlRaw.timeline?.phases || tlRaw.phases || [];
-        const eqRaw = cd?.equipment || {};
-        const rm = eqRaw.reliabilityMetrics || {};
-        const rpn = rm.rpnScores || eqRaw.rpnScores || {};
         const rptRaw = cd?.report || {};
         const rptCore = rptRaw.rcaReport || rptRaw;
+        // Normalize per-agent outputs (handles both compact & elaborate analyst schemas)
+        const fbNorm = normalizeFishbone(cd?.fishbone || {});
+        const fbCats: Record<string, any[]> = Object.keys(fbNorm).length ? fbNorm : (rptCore.fishboneCategories || {});
+        const ftRaw = cd?.faultTree || {};
+        const paretoItems: Array<{ mode: string; frequency: number }> = normalizePareto(cd?.pareto || {});
+        const tlPhases: any[] = normalizeTimeline(cd?.timeline || {});
+        const rm: any = normalizeEquipment(cd?.equipment || {});
+        const rpn = rm.rpnScores || {};
         const rcs: string[] = Array.isArray(rptCore.rootCauses) ? rptCore.rootCauses.filter(Boolean) : [rptRaw.rootCause || editRootCauseText || ""].filter(Boolean);
         const capaFromReport: any[] = rptCore.actionPlan || rptRaw.correctiveActionsList || [];
 
         // ── 5-Why from messages ──
-        const whyMsgs = (cd?.fiveWhyMessages || []).filter((m:any) => m.role === "assistant" && m.parsed);
-        const whySteps = whyMsgs.map((m:any) => m.parsed).filter((p:any) => p && (p.question || p.whyStep)).sort((a:any,b:any) => (a.whyStep||0)-(b.whyStep||0));
+        const whyMsgs = (cd?.fiveWhyMessages || []).filter((m: any) => m.role === "assistant" && m.parsed);
+        const whySteps = whyMsgs.map((m: any) => m.parsed).filter((p: any) => p && (p.question || p.whyStep)).sort((a: any, b: any) => (a.whyStep || 0) - (b.whyStep || 0));
         const whyStream1 = rptCore.whyWhyAnalysis?.stream1 || {};
         const whyStream2 = rptCore.whyWhyAnalysis?.stream2 || {};
 
@@ -4828,45 +4898,45 @@ function CasePage() {
         else if (ftRaw.faultTreeAnalysis?.tree) ftaTree = ftRaw.faultTreeAnalysis.tree;
         else if (ftRaw.faultTreeAnalysis) {
           const fta = ftRaw.faultTreeAnalysis;
-          ftaTree = { id:"top", label: typeof fta.topEvent==="string" ? fta.topEvent : fta.topEvent?.label || "Failure Event", type:"gate", gateType:"OR", probability:1.0, children: Array.isArray(fta.branches)?fta.branches:[] };
+          ftaTree = { id: "top", label: typeof fta.topEvent === "string" ? fta.topEvent : fta.topEvent?.label || "Failure Event", type: "gate", gateType: "OR", probability: 1.0, children: Array.isArray(fta.branches) ? fta.branches : [] };
         } else if (ftRaw.topEvent || ftRaw.branches) {
-          ftaTree = { id:"top", label: ftRaw.topEvent||"Failure Event", type:"gate", gateType:"OR", probability:1.0, children: ftRaw.branches||[] };
+          ftaTree = { id: "top", label: ftRaw.topEvent || "Failure Event", type: "gate", gateType: "OR", probability: 1.0, children: ftRaw.branches || [] };
         }
 
         // ── Recursive FTA renderer ──
         const renderFtaTree = (node: any, depth = 0): React.ReactNode => {
           if (!node) return null;
           const isGate = node.type === "gate";
-          const prob = typeof node.probability === "number" ? `${(node.probability*100).toFixed(1)}%` : null;
+          const prob = typeof node.probability === "number" ? `${(node.probability * 100).toFixed(1)}%` : null;
           const probColor = node.probability > 0.5 ? "text-red-400" : node.probability > 0.2 ? "text-amber-400" : "text-green-400";
           return (
-            <div key={node.id || node.label} style={{marginLeft: depth*20}}>
+            <div key={node.id || node.label} style={{ marginLeft: depth * 20 }}>
               <div className={`flex items-center gap-2 py-1 px-2 rounded my-0.5 ${isGate ? "bg-amber-950/30 border border-amber-500/20" : "bg-blue-950/20 border border-blue-500/10"}`}>
-                <span className={`text-[10px] font-mono ${isGate?"text-amber-400":"text-blue-400"}`}>{isGate?"◈":"◉"}</span>
-                <span className={`text-xs font-medium flex-1 ${isGate?"text-amber-100":"text-slate-300"}`}>{node.label}</span>
+                <span className={`text-[10px] font-mono ${isGate ? "text-amber-400" : "text-blue-400"}`}>{isGate ? "◈" : "◉"}</span>
+                <span className={`text-xs font-medium flex-1 ${isGate ? "text-amber-100" : "text-slate-300"}`}>{node.label}</span>
                 {isGate && node.gateType && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-amber-900/40 text-amber-400 rounded border border-amber-500/20">{node.gateType}</span>}
                 {prob && <span className={`text-[10px] font-mono font-bold ${probColor}`}>{prob}</span>}
               </div>
-              {Array.isArray(node.children) && node.children.map((c:any) => renderFtaTree(c, depth+1))}
+              {Array.isArray(node.children) && node.children.map((c: any) => renderFtaTree(c, depth + 1))}
             </div>
           );
         };
 
         // ── Pareto cumulative calc ──
-        const paretoTotal = paretoItems.reduce((s,i)=>s+(i.frequency||0),0);
+        const paretoTotal = paretoItems.reduce((s, i) => s + (i.frequency || 0), 0);
         let cumFreq = 0;
 
-        const catColors: Record<string,string> = {
-          manpower:"#EF4444", machine:"#F59E0B", methods:"#8B5CF6", method:"#8B5CF6",
-          materials:"#10B981", material:"#10B981", measurements:"#06B6D4", measurement:"#06B6D4", environment:"#3B82F6"
+        const catColors: Record<string, string> = {
+          manpower: "#EF4444", machine: "#F59E0B", methods: "#8B5CF6", method: "#8B5CF6",
+          materials: "#10B981", material: "#10B981", measurements: "#06B6D4", measurement: "#06B6D4", environment: "#3B82F6"
         };
-        const catLabels: Record<string,string> = {
-          manpower:"Skill / Man", machine:"Design / Machine", methods:"Method", method:"Method",
-          materials:"Material", material:"Material", measurements:"Measurement", measurement:"Measurement", environment:"Environment"
+        const catLabels: Record<string, string> = {
+          manpower: "Skill / Man", machine: "Design / Machine", methods: "Method", method: "Method",
+          materials: "Material", material: "Material", measurements: "Measurement", measurement: "Measurement", environment: "Environment"
         };
 
         // ── Section header helper ──
-        const SH = ({num,title,color="text-primary"}:{num:number;title:string;color?:string}) => (
+        const SH = ({ num, title, color = "text-primary" }: { num: number; title: string; color?: string }) => (
           <div className="flex items-center gap-3 pb-2 mb-4 border-b border-border/60">
             <span className="text-[10px] font-mono px-2 py-1 rounded bg-primary/10 text-primary border border-primary/20">STEP {num}</span>
             <h4 className={`font-bold text-sm uppercase tracking-wide ${color}`}>{title}</h4>
@@ -4891,42 +4961,45 @@ function CasePage() {
               <p className="text-[10px] font-bold mono text-blue-300 mb-3">// DOWNLOAD COMPLETE REPORT</p>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" className="bg-emerald-700 hover:bg-emerald-600 text-white gap-1.5 h-8"
-                  onClick={async()=>{ setReportDownloading("xlsx"); try{ const r=await downloadReportFn({data:{caseId,format:"xlsx"}}); if(!r?.base64) throw new Error("No data"); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Excel downloaded"); }catch(e:any){toast.error(e.message);} finally{setReportDownloading(null);} }}
+                  onClick={async () => { setReportDownloading("xlsx"); try { const r = await downloadReportFn({ data: { caseId, format: "xlsx" } }); if (!r?.base64) throw new Error("No data"); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Excel downloaded"); } catch (e: any) { toast.error(e.message); } finally { setReportDownloading(null); } }}
                   disabled={!!reportDownloading}>
-                  {reportDownloading==="xlsx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Excel (.xlsx)
+                  {reportDownloading === "xlsx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Excel (.xlsx)
                 </Button>
                 <Button size="sm" className="bg-blue-700 hover:bg-blue-600 text-white gap-1.5 h-8"
-                  onClick={async()=>{ setReportDownloading("docx"); try{ const r=await downloadReportFn({data:{caseId,format:"docx"}}); if(!r?.base64) throw new Error("No data"); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Word downloaded"); }catch(e:any){toast.error(e.message);} finally{setReportDownloading(null);} }}
+                  onClick={async () => { setReportDownloading("docx"); try { const r = await downloadReportFn({ data: { caseId, format: "docx" } }); if (!r?.base64) throw new Error("No data"); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Word downloaded"); } catch (e: any) { toast.error(e.message); } finally { setReportDownloading(null); } }}
                   disabled={!!reportDownloading}>
-                  {reportDownloading==="docx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Word (.docx)
+                  {reportDownloading === "docx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Word (.docx)
                 </Button>
-                <Button size="sm" variant="outline" className="gap-1.5 h-8" onClick={()=>window.print()}>
-                  <FileText className="w-3 h-3"/> Print / PDF
+                <Button size="sm" variant="outline" className="gap-1.5 h-8" disabled={reportDownloading === "pdf"} onClick={async () => { setReportDownloading("pdf"); try { const r = await downloadReportFn({ data: { caseId, format: "pdf" } }); if (!r?.base64) throw new Error("No data"); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("PDF downloaded"); } catch (e: any) { toast.error(e.message || "PDF export failed"); } finally { setReportDownloading(null); } }}>
+                  {reportDownloading === "pdf" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} PDF
                 </Button>
-                <div className="h-8 w-px bg-border/60 mx-1"/>
-                <button onClick={async()=>{ setExportDownloading("html"); try{ const r=await exportFullAnalysisFn({data:{caseId,format:"html"}}); if(!r?.base64) throw new Error(); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full HTML exported"); }catch(e:any){toast.error("Export failed");} finally{setExportDownloading(null);} }}
+                <Button size="sm" variant="outline" className="gap-1.5 h-8" disabled={reportDownloading === "html"} onClick={async () => { setReportDownloading("html"); try { const r = await downloadReportFn({ data: { caseId, format: "html" } }); if (!r?.base64) throw new Error("No data"); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Report HTML downloaded"); } catch (e: any) { toast.error(e.message || "HTML export failed"); } finally { setReportDownloading(null); } }}>
+                  {reportDownloading === "html" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Report HTML
+                </Button>
+                <div className="h-8 w-px bg-border/60 mx-1" />
+                <button onClick={async () => { setExportDownloading("html"); try { const r = await exportFullAnalysisFn({ data: { caseId, format: "html-full" } }); if (!r?.base64) throw new Error(); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full 8-step HTML exported"); } catch (e: any) { toast.error("Export failed"); } finally { setExportDownloading(null); } }}
                   disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-emerald-950/60 text-emerald-400 hover:bg-emerald-900/60 border border-emerald-500/20 disabled:opacity-50">
-                  {exportDownloading==="html"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Full HTML
+                  {exportDownloading === "html" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Full HTML (8 steps)
                 </button>
-                <button onClick={async()=>{ setExportDownloading("docx"); try{ const r=await exportFullAnalysisFn({data:{caseId,format:"docx"}}); if(!r?.base64) throw new Error(); const b=Uint8Array.from(atob(r.base64),(c)=>c.charCodeAt(0)); const bl=new Blob([b],{type:r.mimeType}); const u=URL.createObjectURL(bl); const a=document.createElement("a"); a.href=u; a.download=r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full Word exported"); }catch(e:any){toast.error("Export failed");} finally{setExportDownloading(null);} }}
+                <button onClick={async () => { setExportDownloading("docx"); try { const r = await exportFullAnalysisFn({ data: { caseId, format: "docx" } }); if (!r?.base64) throw new Error(); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full Word exported"); } catch (e: any) { toast.error("Export failed"); } finally { setExportDownloading(null); } }}
                   disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-blue-950/60 text-blue-400 hover:bg-blue-900/60 border border-blue-500/20 disabled:opacity-50">
-                  {exportDownloading==="docx"?<Loader2 className="w-3 h-3 animate-spin"/>:<FileText className="w-3 h-3"/>} Full Word
+                  {exportDownloading === "docx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Full Word
                 </button>
               </div>
-              <p className="text-[10px] text-blue-400/50 font-mono mt-2">Excel = RCA FORMAT template · Full HTML/Word = all 8 steps combined</p>
+              <p className="text-[10px] text-blue-400/50 font-mono mt-2">Excel/PDF/Report HTML = HZL report template · Full HTML (8 steps) = every step with charts &amp; diagrams</p>
             </div>
 
             {/* ══ Approval State ══ */}
             <div className="bg-secondary/25 border border-border/50 rounded-xl p-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
               <div className="flex items-center gap-3">
-                <Badge className={reportApproved?"bg-emerald-500/25 text-emerald-400 border-emerald-500/40":"bg-amber-500/20 text-amber-400 border-amber-500/40"}>
-                  {reportApproved?"APPROVED & SIGNED":"DRAFT STATE"}
+                <Badge className={reportApproved ? "bg-emerald-500/25 text-emerald-400 border-emerald-500/40" : "bg-amber-500/20 text-amber-400 border-amber-500/40"}>
+                  {reportApproved ? "APPROVED & SIGNED" : "DRAFT STATE"}
                 </Badge>
                 <p className="text-[10px] font-mono text-muted-foreground">// WORKFLOW APPROVAL STATE</p>
               </div>
-              <Button size="sm" variant={reportApproved?"outline":"default"}
-                onClick={()=>{ const n=!reportApproved; setReportApproved(n); toast.success(n?"Report Approved!":"Returned to draft."); }}>
-                {reportApproved?"Revoke Approval":"Sign & Approve Report"}
+              <Button size="sm" variant={reportApproved ? "outline" : "default"}
+                onClick={() => { const n = !reportApproved; setReportApproved(n); toast.success(n ? "Report Approved!" : "Returned to draft."); }}>
+                {reportApproved ? "Revoke Approval" : "Sign & Approve Report"}
               </Button>
             </div>
 
@@ -4935,7 +5008,7 @@ function CasePage() {
             {/* ══════════════════════════════════════════════════════════ */}
             {cLoading && (
               <div className="flex items-center gap-3 p-4 bg-secondary/20 border border-border/40 rounded-xl">
-                <Loader2 className="w-4 h-4 animate-spin text-primary"/>
+                <Loader2 className="w-4 h-4 animate-spin text-primary" />
                 <span className="text-sm text-muted-foreground mono">Loading all analysis steps…</span>
               </div>
             )}
@@ -4943,56 +5016,56 @@ function CasePage() {
             {/* ══ STEP 1 — DATA COLLECTION ══ */}
             {cd && (col.problemStatement || col.equipmentName) && (
               <div className="bg-secondary/15 border border-blue-500/20 rounded-xl p-5 space-y-4">
-                <SH num={1} title="Data Collection & Validation" color="text-blue-400"/>
+                <SH num={1} title="Data Collection & Validation" color="text-blue-400" />
                 <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
-                  {[["Problem Statement",col.problemStatement],["Effect / Impact",col.effect],["Equipment Name",col.equipmentName],["Location / Unit",col.location],["Operating Conditions",col.operatingConditions],["Incident Timestamp",col.timestamp],["Witnessed Symptoms",col.witnessedSymptoms]].filter(([,v])=>v).map(([l,v])=>(
-                    <div key={l as string} className={`flex gap-2 ${l==="Problem Statement"||l==="Witnessed Symptoms"?"col-span-2":""}`}>
+                  {[["Problem Statement", col.problemStatement], ["Effect / Impact", col.effect], ["Equipment Name", col.equipmentName], ["Location / Unit", col.location], ["Operating Conditions", col.operatingConditions], ["Incident Timestamp", col.timestamp], ["Witnessed Symptoms", col.witnessedSymptoms]].filter(([, v]) => v).map(([l, v]) => (
+                    <div key={l as string} className={`flex gap-2 ${l === "Problem Statement" || l === "Witnessed Symptoms" ? "col-span-2" : ""}`}>
                       <span className="text-muted-foreground font-mono shrink-0 min-w-[130px]">{l as string}:</span>
                       <span className="text-foreground">{v as string}</span>
                     </div>
                   ))}
                 </div>
-                {Array.isArray(col.gaps)&&col.gaps.length>0&&(
+                {Array.isArray(col.gaps) && col.gaps.length > 0 && (
                   <div>
                     <p className="text-[10px] font-mono text-amber-400 mb-2">GAPS / UNRESOLVED QUESTIONS</p>
-                    <div className="flex flex-wrap gap-2">{col.gaps.map((g:string,i:number)=><span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-500/20">{g}</span>)}</div>
+                    <div className="flex flex-wrap gap-2">{col.gaps.map((g: string, i: number) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-500/20">{g}</span>)}</div>
                   </div>
                 )}
-                {Array.isArray(col.followUps)&&col.followUps.length>0&&(
+                {Array.isArray(col.followUps) && col.followUps.length > 0 && (
                   <div>
                     <p className="text-[10px] font-mono text-blue-400 mb-2">SUGGESTED FOLLOW-UPS</p>
-                    <div className="flex flex-wrap gap-2">{col.followUps.map((f:string,i:number)=><span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-blue-950/40 text-blue-300 border border-blue-500/20">{f}</span>)}</div>
+                    <div className="flex flex-wrap gap-2">{col.followUps.map((f: string, i: number) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-blue-950/40 text-blue-300 border border-blue-500/20">{f}</span>)}</div>
                   </div>
                 )}
               </div>
             )}
 
             {/* ══ STEP 2 — 5-WHY ══ */}
-            {cd && (whySteps.length>0 || Object.values(whyStream1).some(Boolean)) && (
+            {cd && (whySteps.length > 0 || Object.values(whyStream1).some(Boolean)) && (
               <div className="bg-secondary/15 border border-amber-500/20 rounded-xl p-5 space-y-4">
-                <SH num={2} title="5-Why Root Cause Analysis" color="text-amber-400"/>
-                {(rptCore.whyWhyAnalysis?.problem||whySteps[0]?.problemStatement) && (
+                <SH num={2} title="5-Why Root Cause Analysis" color="text-amber-400" />
+                {(rptCore.whyWhyAnalysis?.problem || whySteps[0]?.problemStatement) && (
                   <div className="bg-amber-950/20 border border-amber-500/15 rounded-lg px-4 py-3">
                     <span className="text-[10px] font-mono text-amber-400 mr-2">PROBLEM:</span>
-                    <span className="text-sm font-semibold">{rptCore.whyWhyAnalysis?.problem||whySteps[0]?.problemStatement}</span>
+                    <span className="text-sm font-semibold">{rptCore.whyWhyAnalysis?.problem || whySteps[0]?.problemStatement}</span>
                   </div>
                 )}
                 {Object.values(whyStream1).some(Boolean) ? (
                   <div className="grid grid-cols-2 gap-6">
-                    {([["Stream 1 — Primary Chain",whyStream1,"amber"],["Stream 2 — Contributing Chain",whyStream2,"violet"]] as const).map(([label,stream,col])=>{
-                      const entries = Object.entries(stream as Record<string,string>).filter(([,v])=>v);
-                      if(!entries.length) return null;
+                    {([["Stream 1 — Primary Chain", whyStream1, "amber"], ["Stream 2 — Contributing Chain", whyStream2, "violet"]] as const).map(([label, stream, col]) => {
+                      const entries = Object.entries(stream as Record<string, string>).filter(([, v]) => v);
+                      if (!entries.length) return null;
                       return (
                         <div key={label as string}>
                           <p className="text-[10px] font-mono text-muted-foreground mb-2">{label as string}</p>
                           <div className="space-y-0">
-                            {entries.map(([k,v],i)=>(
+                            {entries.map(([k, v], i) => (
                               <div key={k}>
                                 <div className="flex gap-0">
-                                  <div className={`text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0`}>{k.replace("why","WHY ")}</div>
+                                  <div className={`text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0`}>{k.replace("why", "WHY ")}</div>
                                   <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">{v}</div>
                                 </div>
-                                {i<entries.length-1&&<div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
+                                {i < entries.length - 1 && <div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
                               </div>
                             ))}
                           </div>
@@ -5002,16 +5075,16 @@ function CasePage() {
                   </div>
                 ) : (
                   <div className="space-y-0">
-                    {whySteps.map((step:any,i:number)=>(
+                    {whySteps.map((step: any, i: number) => (
                       <div key={i}>
                         <div className="flex gap-0">
-                          <div className="text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0">WHY {step.whyStep||i+1}</div>
+                          <div className="text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0">WHY {step.whyStep || i + 1}</div>
                           <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">
-                            {step.question&&<div className="font-semibold mb-1">{step.question}</div>}
-                            {(step.selectedAnswer||step.operatorInstruction)&&<div className="text-muted-foreground">↳ {step.selectedAnswer||step.operatorInstruction}</div>}
+                            {step.question && <div className="font-semibold mb-1">{step.question}</div>}
+                            {(step.selectedAnswer || step.operatorInstruction) && <div className="text-muted-foreground">↳ {step.selectedAnswer || step.operatorInstruction}</div>}
                           </div>
                         </div>
-                        {i<whySteps.length-1&&<div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
+                        {i < whySteps.length - 1 && <div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
                       </div>
                     ))}
                   </div>
@@ -5020,24 +5093,24 @@ function CasePage() {
             )}
 
             {/* ══ STEP 3 — FISHBONE ══ */}
-            {cd && Object.keys(fbCats).some(k=>Array.isArray(fbCats[k])&&fbCats[k].length) && (
+            {cd && Object.keys(fbCats).some(k => Array.isArray(fbCats[k]) && fbCats[k].length) && (
               <div className="bg-secondary/15 border border-violet-500/20 rounded-xl p-5 space-y-4">
-                <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-violet-400"/>
+                <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-violet-400" />
                 <div className="grid grid-cols-3 gap-3">
-                  {Object.entries(fbCats).filter(([,v])=>Array.isArray(v)&&v.length).map(([key,causes])=>{
-                    const color = catColors[key]||"#64748B";
-                    const label = catLabels[key]||key;
+                  {Object.entries(fbCats).filter(([, v]) => Array.isArray(v) && v.length).map(([key, causes]) => {
+                    const color = catColors[key] || "#64748B";
+                    const label = catLabels[key] || key;
                     return (
-                      <div key={key} className="bg-background/40 border border-border/30 rounded-lg p-3" style={{borderTop:`3px solid ${color}`}}>
-                        <p className="text-[10px] font-mono font-bold mb-2" style={{color}}>{label}</p>
+                      <div key={key} className="bg-background/40 border border-border/30 rounded-lg p-3" style={{ borderTop: `3px solid ${color}` }}>
+                        <p className="text-[10px] font-mono font-bold mb-2" style={{ color }}>{label}</p>
                         <ul className="space-y-1.5">
-                          {(causes as any[]).map((c:any,ci:number)=>{
-                            const name = typeof c==="string"?c:c.cause||"";
-                            const subs: string[] = typeof c==="object"?(c.subCauses||[]):[];
+                          {(causes as any[]).map((c: any, ci: number) => {
+                            const name = typeof c === "string" ? c : c.cause || "";
+                            const subs: string[] = typeof c === "object" ? (c.subCauses || []) : [];
                             return (
-                              <li key={ci} className="text-xs pl-2 border-l-2" style={{borderColor:color+"66"}}>
+                              <li key={ci} className="text-xs pl-2 border-l-2" style={{ borderColor: color + "66" }}>
                                 {name}
-                                {subs.map((s,si)=><div key={si} className="text-[10px] text-muted-foreground pl-2">↳ {s}</div>)}
+                                {subs.map((s, si) => <div key={si} className="text-[10px] text-muted-foreground pl-2">↳ {s}</div>)}
                               </li>
                             );
                           })}
@@ -5052,7 +5125,7 @@ function CasePage() {
             {/* ══ STEP 4 — FTA ══ */}
             {cd && ftaTree && (
               <div className="bg-secondary/15 border border-emerald-500/20 rounded-xl p-5 space-y-4">
-                <SH num={4} title="Fault Tree Analysis (FTA)" color="text-emerald-400"/>
+                <SH num={4} title="Fault Tree Analysis (FTA)" color="text-emerald-400" />
                 <div className="bg-background/40 border border-border/30 rounded-lg p-4 font-mono text-xs overflow-x-auto">
                   {renderFtaTree(ftaTree)}
                 </div>
@@ -5065,9 +5138,9 @@ function CasePage() {
             )}
 
             {/* ══ STEP 5 — PARETO ══ */}
-            {cd && paretoItems.length>0 && (
+            {cd && paretoItems.length > 0 && (
               <div className="bg-secondary/15 border border-cyan-500/20 rounded-xl p-5 space-y-4">
-                <SH num={5} title="Pareto Analysis" color="text-cyan-400"/>
+                <SH num={5} title="Pareto Analysis" color="text-cyan-400" />
                 <div className="space-y-1">
                   <div className="flex gap-3 text-[9px] font-mono text-muted-foreground pb-1 border-b border-border/40">
                     <span className="w-52">Failure Mode</span>
@@ -5075,49 +5148,49 @@ function CasePage() {
                     <span className="w-10 text-right">Freq</span>
                     <span className="w-14 text-right">Cum %</span>
                   </div>
-                  {paretoItems.map((item,idx)=>{
-                    cumFreq += item.frequency||0;
-                    const cumPct = paretoTotal>0?(cumFreq/paretoTotal)*100:0;
-                    const barPct = paretoTotal>0?Math.round((item.frequency/paretoItems[0].frequency)*100):0;
-                    const barColor = cumPct<=80?"bg-cyan-500":"bg-slate-600";
+                  {paretoItems.map((item, idx) => {
+                    cumFreq += item.frequency || 0;
+                    const cumPct = paretoTotal > 0 ? (cumFreq / paretoTotal) * 100 : 0;
+                    const barPct = paretoTotal > 0 ? Math.round((item.frequency / paretoItems[0].frequency) * 100) : 0;
+                    const barColor = cumPct <= 80 ? "bg-cyan-500" : "bg-slate-600";
                     return (
                       <div key={idx} className="flex items-center gap-3 py-1.5 border-b border-border/20">
                         <span className="w-52 text-xs truncate">{item.mode}</span>
                         <div className="flex-1 h-4 bg-background/60 rounded overflow-hidden">
-                          <div className={`h-full rounded ${barColor}`} style={{width:`${barPct}%`}}/>
+                          <div className={`h-full rounded ${barColor}`} style={{ width: `${barPct}%` }} />
                         </div>
                         <span className="w-10 text-right text-xs font-mono">{item.frequency}</span>
-                        <span className={`w-14 text-right text-xs font-mono ${cumPct<=80?"text-cyan-400":"text-muted-foreground"}`}>{cumPct.toFixed(0)}%</span>
+                        <span className={`w-14 text-right text-xs font-mono ${cumPct <= 80 ? "text-cyan-400" : "text-muted-foreground"}`}>{cumPct.toFixed(0)}%</span>
                       </div>
                     );
                   })}
                 </div>
                 <div className="flex gap-4 text-[10px] font-mono">
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-cyan-500 inline-block"/>≤80% cumulative</span>
-                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-slate-600 inline-block"/>Remaining</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-cyan-500 inline-block" />≤80% cumulative</span>
+                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm bg-slate-600 inline-block" />Remaining</span>
                 </div>
               </div>
             )}
 
             {/* ══ STEP 6 — TIMELINE ══ */}
-            {cd && tlPhases.length>0 && (
+            {cd && tlPhases.length > 0 && (
               <div className="bg-secondary/15 border border-orange-500/20 rounded-xl p-5 space-y-3">
-                <SH num={6} title="Incident Timeline" color="text-orange-400"/>
+                <SH num={6} title="Incident Timeline" color="text-orange-400" />
                 <div className="space-y-0">
-                  {tlPhases.map((phase:any,idx:number)=>{
-                    const phaseColors=["border-blue-500","border-violet-500","border-amber-500","border-emerald-500","border-red-500","border-cyan-500"];
-                    const textColors=["text-blue-400","text-violet-400","text-amber-400","text-emerald-400","text-red-400","text-cyan-400"];
-                    const col = phaseColors[idx%phaseColors.length];
-                    const tc = textColors[idx%textColors.length];
+                  {tlPhases.map((phase: any, idx: number) => {
+                    const phaseColors = ["border-blue-500", "border-violet-500", "border-amber-500", "border-emerald-500", "border-red-500", "border-cyan-500"];
+                    const textColors = ["text-blue-400", "text-violet-400", "text-amber-400", "text-emerald-400", "text-red-400", "text-cyan-400"];
+                    const col = phaseColors[idx % phaseColors.length];
+                    const tc = textColors[idx % textColors.length];
                     return (
-                      <div key={idx} className={`border-l-4 ${col} pl-4 pb-4 pt-1 ${idx>0?"mt-0":""}`}>
+                      <div key={idx} className={`border-l-4 ${col} pl-4 pb-4 pt-1 ${idx > 0 ? "mt-0" : ""}`}>
                         <div className="flex items-center gap-3 mb-1">
                           <span className={`font-bold text-sm ${tc}`}>{phase.phase}</span>
                           <span className="text-[10px] font-mono text-muted-foreground bg-secondary/50 px-2 py-0.5 rounded-full">{phase.start} · {phase.duration}</span>
                         </div>
-                        {phase.description&&<p className="text-xs text-muted-foreground mb-2">{phase.description}</p>}
+                        {phase.description && <p className="text-xs text-muted-foreground mb-2">{phase.description}</p>}
                         <ul className="space-y-1">
-                          {(Array.isArray(phase.events)?phase.events:[]).map((ev:string,ei:number)=>(
+                          {(Array.isArray(phase.events) ? phase.events : []).map((ev: string, ei: number) => (
                             <li key={ei} className="text-xs px-3 py-1.5 bg-background/40 rounded border border-border/20 flex gap-2">
                               <span className="text-muted-foreground">›</span>{ev}
                             </li>
@@ -5131,34 +5204,34 @@ function CasePage() {
             )}
 
             {/* ══ STEP 7 — EQUIPMENT ══ */}
-            {cd && (rm.mtbf||rm.mttr||Object.keys(rpn).length>0) && (
+            {cd && (rm.mtbf || rm.mttr || Object.keys(rpn).length > 0) && (
               <div className="bg-secondary/15 border border-pink-500/20 rounded-xl p-5 space-y-4">
-                <SH num={7} title="Equipment Reliability & RPN Analysis" color="text-pink-400"/>
-                {(rm.mtbf||rm.mttr||rm.availability||rm.failureRate)&&(
+                <SH num={7} title="Equipment Reliability & RPN Analysis" color="text-pink-400" />
+                {(rm.mtbf || rm.mttr || rm.availability || rm.failureRate) && (
                   <div className="grid grid-cols-4 gap-3">
-                    {([["MTBF",rm.mtbf,"#60A5FA"],["MTTR",rm.mttr,"#A78BFA"],["Availability",rm.availability,"#34D399"],["Failure Rate",rm.failureRate,"#F87171"]] as const).filter(([,v])=>v).map(([label,metric,color])=>(
-                      <div key={label as string} className="bg-background/50 border border-border/30 rounded-xl p-4 text-center" style={{borderTop:`3px solid ${color}`}}>
+                    {([["MTBF", rm.mtbf, "#60A5FA"], ["MTTR", rm.mttr, "#A78BFA"], ["Availability", rm.availability, "#34D399"], ["Failure Rate", rm.failureRate, "#F87171"]] as const).filter(([, v]) => v).map(([label, metric, color]) => (
+                      <div key={label as string} className="bg-background/50 border border-border/30 rounded-xl p-4 text-center" style={{ borderTop: `3px solid ${color}` }}>
                         <p className="text-[9px] font-mono text-muted-foreground mb-2">{label as string}</p>
-                        <p className="text-lg font-bold" style={{color:color as string}}>{(metric as any)?.value||"—"}</p>
-                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">{(metric as any)?.trend||""}</p>
+                        <p className="text-lg font-bold" style={{ color: color as string }}>{(metric as any)?.value || "—"}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1 leading-snug">{(metric as any)?.trend || ""}</p>
                       </div>
                     ))}
                   </div>
                 )}
-                {Object.keys(rpn).length>0&&(
+                {Object.keys(rpn).length > 0 && (
                   <div>
                     <p className="text-[10px] font-mono text-muted-foreground mb-2">RPN SCORES (Risk Priority Number, 1–100)</p>
                     <div className="grid grid-cols-3 gap-3">
-                      {Object.entries(rpn).map(([k,v])=>{
-                        const score = Number(v)||0;
-                        const rColor = score>=70?"#EF4444":score>=40?"#F59E0B":"#22C55E";
+                      {Object.entries(rpn).map(([k, v]) => {
+                        const score = Number(v) || 0;
+                        const rColor = score >= 70 ? "#EF4444" : score >= 40 ? "#F59E0B" : "#22C55E";
                         return (
                           <div key={k} className="bg-background/50 border border-border/30 rounded-lg p-3">
                             <p className="text-[10px] font-mono text-muted-foreground capitalize mb-2">{k}</p>
                             <div className="h-2 bg-secondary/40 rounded-full mb-1.5 overflow-hidden">
-                              <div className="h-full rounded-full" style={{width:`${score}%`,background:rColor}}/>
+                              <div className="h-full rounded-full" style={{ width: `${score}%`, background: rColor }} />
                             </div>
-                            <p className="text-xl font-bold" style={{color:rColor}}>{score}</p>
+                            <p className="text-xl font-bold" style={{ color: rColor }}>{score}</p>
                           </div>
                         );
                       })}
@@ -5170,29 +5243,29 @@ function CasePage() {
 
             {/* ══ STEP 8 — ROOT CAUSES & CAPA ══ */}
             <div className="bg-red-950/20 border border-red-500/25 rounded-xl p-5 space-y-4">
-              <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-400"/>
+              <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-400" />
 
               {/* Editable problem + root cause */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-[10px] text-muted-foreground font-mono block mb-1">PROBLEM STATEMENT</label>
-                  <input type="text" value={editProblemStatement} onChange={e=>setEditProblemStatement(e.target.value)}
-                    className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground"/>
+                  <input type="text" value={editProblemStatement} onChange={e => setEditProblemStatement(e.target.value)}
+                    className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground" />
                 </div>
                 <div>
                   <label className="text-[10px] text-muted-foreground font-mono block mb-1">CONFIRMED ROOT CAUSE</label>
-                  <Textarea value={editRootCauseText} onChange={e=>setEditRootCauseText(e.target.value)} autoResize
-                    className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground"/>
+                  <Textarea value={editRootCauseText} onChange={e => setEditRootCauseText(e.target.value)} autoResize
+                    className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground" />
                 </div>
               </div>
 
               {/* Root causes from report agent */}
-              {rcs.filter(rc=>rc&&rc!==editRootCauseText).length>0&&(
+              {rcs.filter(rc => rc && rc !== editRootCauseText).length > 0 && (
                 <div className="space-y-2">
                   <p className="text-[10px] font-mono text-red-400">IDENTIFIED ROOT CAUSES</p>
-                  {rcs.map((rc,i)=>(
+                  {rcs.map((rc, i) => (
                     <div key={i} className="flex gap-2 text-xs p-2 bg-red-950/20 border border-red-500/15 rounded">
-                      <span className="text-red-400 font-bold shrink-0">{i+1}.</span>
+                      <span className="text-red-400 font-bold shrink-0">{i + 1}.</span>
                       <span>{rc}</span>
                     </div>
                   ))}
@@ -5200,9 +5273,9 @@ function CasePage() {
               )}
 
               {/* Report header fields */}
-              {(rptCore.header?.rcaNumber||rptCore.equipment?.name)&&(
+              {(rptCore.header?.rcaNumber || rptCore.equipment?.name) && (
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
-                  {[["RCA No.",rptCore.header?.rcaNumber],["Plant",rptCore.header?.plant],["Department",rptCore.header?.department],["Section",rptCore.header?.section],["Equipment",rptCore.equipment?.name],["Occurrence",rptCore.equipment?.occurrenceDateTime],["Restoration",rptCore.equipment?.restorationDateTime],["Prod. Affected",rptCore.equipment?.productionAffectedHours]].filter(([,v])=>v).map(([l,v])=>(
+                  {[["RCA No.", rptCore.header?.rcaNumber], ["Plant", rptCore.header?.plant], ["Department", rptCore.header?.department], ["Section", rptCore.header?.section], ["Equipment", rptCore.equipment?.name], ["Occurrence", rptCore.equipment?.occurrenceDateTime], ["Restoration", rptCore.equipment?.restorationDateTime], ["Prod. Affected", rptCore.equipment?.productionAffectedHours]].filter(([, v]) => v).map(([l, v]) => (
                     <div key={l as string} className="flex gap-2">
                       <span className="text-muted-foreground font-mono shrink-0 w-28">{l as string}:</span>
                       <span className="text-foreground font-medium">{v as string}</span>
@@ -5212,14 +5285,14 @@ function CasePage() {
               )}
 
               {/* Cost of failure */}
-              {rptCore.costOfFailure&&(
+              {rptCore.costOfFailure && (
                 <div>
                   <p className="text-[10px] font-mono text-muted-foreground mb-2">COST OF FAILURE</p>
                   <div className="grid grid-cols-4 gap-2">
-                    {[["Spare Parts",rptCore.costOfFailure.sparePartCost],["Service",rptCore.costOfFailure.serviceCost],["Manpower",rptCore.costOfFailure.manpowerCost],["Prod. Loss",rptCore.costOfFailure.productionLoss]].map(([l,v])=>(
+                    {[["Spare Parts", rptCore.costOfFailure.sparePartCost], ["Service", rptCore.costOfFailure.serviceCost], ["Manpower", rptCore.costOfFailure.manpowerCost], ["Prod. Loss", rptCore.costOfFailure.productionLoss]].map(([l, v]) => (
                       <div key={l as string} className="bg-background/50 border border-border/30 rounded-lg p-2 text-center">
                         <p className="text-[9px] font-mono text-muted-foreground">{l as string} (Lacs)</p>
-                        <p className="text-base font-bold mt-0.5">{v??0}</p>
+                        <p className="text-base font-bold mt-0.5">{v ?? 0}</p>
                       </div>
                     ))}
                   </div>
@@ -5230,37 +5303,47 @@ function CasePage() {
               <div className="space-y-3">
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] font-mono text-primary font-bold">CAPA ACTION ITEM TRACKER</span>
-                  <Button size="sm" onClick={addCapa} className="h-7 text-xs"><Plus className="w-3 h-3 mr-1"/>Add</Button>
                 </div>
-                {capaActions.map(act=>(
+                {capaActions.map(act => (
                   <div key={act.id} className="p-3 border border-border/50 rounded-lg bg-background/50 text-xs space-y-2">
-                    <div className="flex gap-2">
-                      <input type="text" value={act.desc} onChange={e=>updateCapa(act.id,"desc",e.target.value)}
-                        className="flex-1 bg-transparent border-0 p-0 text-xs font-semibold focus:ring-0 focus:outline-none text-foreground"/>
-                      <button onClick={()=>deleteCapa(act.id)} className="text-muted-foreground hover:text-red-400"><Trash2 className="w-3.5 h-3.5"/></button>
+                    <div className="flex justify-between items-center text-[10px] font-mono text-muted-foreground uppercase">
+                      <span>Action Item Description</span>
+                      <button onClick={() => deleteCapa(act.id)} className="text-muted-foreground hover:text-red-400 p-0.5 rounded hover:bg-red-500/10 transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
+                    <Textarea
+                      value={act.desc}
+                      onChange={e => updateCapa(act.id, "desc", e.target.value)}
+                      autoResize
+                      placeholder="Describe the action item in detail..."
+                      className="w-full text-xs font-semibold text-foreground px-3 py-2 min-h-[60px]"
+                    />
                     <div className="grid grid-cols-5 gap-2 pt-1.5 border-t border-border/20 text-[9px] mono">
-                      {[["Type","type","CA|PA",act.type||"CA"],["Owner","owner","text",act.owner],["Dept","dept","text",act.dept||""],["Due","date","text",act.date],["Status","status","Pending|In Progress|Completed",act.status]].map(([lbl,field,opts,val])=>(
+                      {[["Type", "type", "CA|PA", act.type || "CA"], ["Owner", "owner", "text", act.owner], ["Dept", "dept", "text", act.dept || ""], ["Due", "date", "text", act.date], ["Status", "status", "Pending|In Progress|Completed", act.status]].map(([lbl, field, opts, val]) => (
                         <div key={field as string}>
                           <span className="text-muted-foreground">{lbl as string}:</span>
-                          {(opts as string).includes("|")?(
-                            <select value={val as string} onChange={e=>updateCapa(act.id,field as string,e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
-                              {(opts as string).split("|").map(o=><option key={o} value={o}>{o}</option>)}
+                          {(opts as string).includes("|") ? (
+                            <select value={val as string} onChange={e => updateCapa(act.id, field as string, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
+                              {(opts as string).split("|").map(o => <option key={o} value={o}>{o}</option>)}
                             </select>
-                          ):(
-                            <input type="text" value={val as string} onChange={e=>updateCapa(act.id,field as string,e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground"/>
+                          ) : (
+                            <input type="text" value={val as string} onChange={e => updateCapa(act.id, field as string, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground" />
                           )}
                         </div>
                       ))}
                     </div>
                   </div>
                 ))}
+                <div className="flex justify-start">
+                  <Button size="sm" onClick={addCapa} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90">
+                    <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Action Item
+                  </Button>
+                </div>
               </div>
 
               {/* Deployment */}
-              {(rptCore.horizontalDeployment||rptCore.preventiveMeasures)&&(
+              {(rptCore.horizontalDeployment || rptCore.preventiveMeasures) && (
                 <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs pt-2 border-t border-border/30">
-                  {[["Horizontal Deployment",rptCore.horizontalDeployment],["Preventive Measures",rptCore.preventiveMeasures],["Sustainable Measures (SOP/SMP)",rptCore.sustainableMeasures],["FMEA Update Needed?",rptCore.changesRequiredInFMEA]].filter(([,v])=>v).map(([l,v])=>(
+                  {[["Horizontal Deployment", rptCore.horizontalDeployment], ["Preventive Measures", rptCore.preventiveMeasures], ["Sustainable Measures (SOP/SMP)", rptCore.sustainableMeasures], ["FMEA Update Needed?", rptCore.changesRequiredInFMEA]].filter(([, v]) => v).map(([l, v]) => (
                     <div key={l as string} className="flex gap-2 col-span-2">
                       <span className="text-muted-foreground font-mono shrink-0 w-48">{l as string}:</span>
                       <span className="text-foreground">{v as string}</span>
@@ -5273,9 +5356,9 @@ function CasePage() {
             {/* ══ CAPA Validation Checklist ══ */}
             <div className="bg-secondary/15 border border-border/40 rounded-xl p-4 space-y-3">
               <span className="text-[10px] text-primary font-bold mono block">// CAPA VALIDATION & QUALITY AUDIT CHECKLIST</span>
-              {[{key:"rootCauseMapped",label:"Root cause verified and mapped to physical evidence logs"},{key:"capaFeasible",label:"CAPA actions are immediately feasible and budget-allocated"},{key:"redundancyMet",label:"Preventive actions build redundancy to prevent multi-point failure recurrence"}].map(chk=>(
+              {[{ key: "rootCauseMapped", label: "Root cause verified and mapped to physical evidence logs" }, { key: "capaFeasible", label: "CAPA actions are immediately feasible and budget-allocated" }, { key: "redundancyMet", label: "Preventive actions build redundancy to prevent multi-point failure recurrence" }].map(chk => (
                 <div key={chk.key} className="flex items-start gap-2.5 p-2 rounded bg-background/30 hover:bg-background/50 transition-colors">
-                  <input type="checkbox" id={`chk-${chk.key}`} checked={!!capaChecklist[chk.key]} onChange={e=>setCapaChecklist({...capaChecklist,[chk.key]:e.target.checked})} className="rounded border-border bg-background text-primary mt-0.5"/>
+                  <input type="checkbox" id={`chk-${chk.key}`} checked={!!capaChecklist[chk.key]} onChange={e => setCapaChecklist({ ...capaChecklist, [chk.key]: e.target.checked })} className="rounded border-border bg-background text-primary mt-0.5" />
                   <label htmlFor={`chk-${chk.key}`} className="cursor-pointer text-xs select-none leading-relaxed text-muted-foreground">{chk.label}</label>
                 </div>
               ))}
@@ -5379,8 +5462,7 @@ function CasePage() {
               return (
                 <div
                   key={agent.key}
-                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs transition-all ${
-                    status === "complete"
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs transition-all ${status === "complete"
                       ? "bg-emerald-500/5 border-emerald-500/20"
                       : status === "running"
                         ? "bg-violet-500/5 border-violet-500/30"
@@ -5389,7 +5471,7 @@ function CasePage() {
                           : status === "error"
                             ? "bg-red-500/5 border-red-500/30"
                             : "bg-transparent border-transparent opacity-30"
-                  }`}
+                    }`}
                 >
                   <div className="mt-0.5 shrink-0">
                     {status === "complete" ? (
@@ -5413,6 +5495,12 @@ function CasePage() {
                     </div>
                     {lastStep?.message && status === "running" && (
                       <p className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{lastStep.message}</p>
+                    )}
+                    {status === "running" && autoLiveText[agent.key] && (
+                      <pre className="mt-1.5 max-h-28 overflow-y-auto rounded bg-black/40 border border-violet-500/20 p-2 text-[10px] leading-relaxed text-violet-200/80 whitespace-pre-wrap break-words">
+                        {autoLiveText[agent.key].slice(-1200)}
+                        <span className="inline-block w-1.5 h-3 bg-violet-400/70 animate-pulse align-middle ml-0.5" />
+                      </pre>
                     )}
                   </div>
                   {status === "running" && lastStep && (
@@ -5519,8 +5607,7 @@ function CasePage() {
                 <button
                   onClick={() => isClickable && goToAgent(idx)}
                   disabled={!isClickable}
-                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs mono transition-all duration-300 ${
-                    isCurrent
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs mono transition-all duration-300 ${isCurrent
                       ? "bg-primary/20 border-2 border-primary text-primary shadow-[0_0_15px_rgba(251,191,36,0.3)] scale-105"
                       : isComplete
                         ? "bg-[color:var(--signal-ok)]/15 border border-[color:var(--signal-ok)]/40 text-[color:var(--signal-ok)]"
@@ -5529,7 +5616,7 @@ function CasePage() {
                           : isFuture
                             ? "bg-secondary/50 border border-border text-muted-foreground opacity-50"
                             : "bg-secondary border border-border text-muted-foreground"
-                  }`}
+                    }`}
                 >
                   {isComplete ? (
                     <CheckCircle2 className="w-3 h-3" />
@@ -5542,11 +5629,10 @@ function CasePage() {
                 </button>
                 {idx < AGENTS.length - 1 && (
                   <ArrowRight
-                    className={`w-3 h-3 mx-2 shrink-0 transition-colors ${
-                      isComplete || idx < agentStep
+                    className={`w-3 h-3 mx-2 shrink-0 transition-colors ${isComplete || idx < agentStep
                         ? "text-[color:var(--signal-ok)]/50"
                         : "text-muted-foreground/30"
-                    }`}
+                      }`}
                   />
                 )}
               </div>
@@ -5593,8 +5679,7 @@ function CasePage() {
                     key={a.key}
                     disabled={!isClickable}
                     onClick={() => isClickable && goToAgent(idx)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-all flex items-center justify-between border ${
-                      isSelected
+                    className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-all flex items-center justify-between border ${isSelected
                         ? "bg-primary/10 border-primary/40 text-primary font-bold shadow-[0_0_10px_rgba(251,191,36,0.15)]"
                         : isCompleted
                           ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10"
@@ -5603,16 +5688,15 @@ function CasePage() {
                             : isClickable
                               ? "bg-transparent border-transparent text-foreground hover:bg-secondary"
                               : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center gap-2">
-                      <span className={`mono text-[10px] ${
-                        isSelected 
-                          ? "text-primary/70" 
-                          : isCompleted 
-                            ? "text-emerald-400/70" 
+                      <span className={`mono text-[10px] ${isSelected
+                          ? "text-primary/70"
+                          : isCompleted
+                            ? "text-emerald-400/70"
                             : "text-muted-foreground/40"
-                      }`}>{a.order}.</span>
+                        }`}>{a.order}.</span>
                       <span className="font-mono">{a.shortName}</span>
                     </div>
                     {isCompleted ? (
@@ -5662,7 +5746,7 @@ function CasePage() {
               <Button
                 variant="outline"
                 size="sm"
-                className="w-full border-violet-500/40 text-violet-400 hover:bg-violet-500/10 hover:border-violet-500/60 font-semibold"
+                className="w-full border-violet-500/40 text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 hover:border-violet-500/60 font-semibold"
                 onClick={() => { setShowAutoModal(true); }}
                 disabled={autoMut.isPending}
               >
@@ -5700,57 +5784,6 @@ function CasePage() {
                   )}
                   Run Analysis
                 </Button>
-
-                {/* Export All button — downloads HTML or DOCX of all 8 steps */}
-                <div className="flex items-center gap-1 border border-border/60 rounded-lg overflow-hidden">
-                  <button
-                    onClick={async () => {
-                      setExportDownloading("html");
-                      try {
-                        const result = await exportFullAnalysisFn({ data: { caseId, format: "html" } });
-                        if (!result?.base64) throw new Error("No file returned");
-                        const bytes = Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0));
-                        const blob = new Blob([bytes], { type: result.mimeType });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = url; a.download = result.filename; a.click();
-                        URL.revokeObjectURL(url);
-                        toast.success("Full analysis exported as HTML");
-                      } catch (e: any) { toast.error(e.message || "Export failed"); }
-                      finally { setExportDownloading(null); }
-                    }}
-                    disabled={!!exportDownloading}
-                    className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 bg-emerald-950/60 text-emerald-400 hover:bg-emerald-900/60 border-r border-border/60 transition-colors disabled:opacity-50"
-                    title="Export all 8 steps as HTML"
-                  >
-                    {exportDownloading === "html" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
-                    HTML
-                  </button>
-                  <button
-                    onClick={async () => {
-                      setExportDownloading("docx");
-                      try {
-                        const result = await exportFullAnalysisFn({ data: { caseId, format: "docx" } });
-                        if (!result?.base64) throw new Error("No file returned");
-                        const bytes = Uint8Array.from(atob(result.base64), (c) => c.charCodeAt(0));
-                        const blob = new Blob([bytes], { type: result.mimeType });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = url; a.download = result.filename; a.click();
-                        URL.revokeObjectURL(url);
-                        toast.success("Full analysis exported as Word");
-                      } catch (e: any) { toast.error(e.message || "Export failed"); }
-                      finally { setExportDownloading(null); }
-                    }}
-                    disabled={!!exportDownloading}
-                    className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 bg-blue-950/60 text-blue-400 hover:bg-blue-900/60 transition-colors disabled:opacity-50"
-                    title="Export all 8 steps as Word"
-                  >
-                    {exportDownloading === "docx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />}
-                    Word
-                  </button>
-                </div>
-
                 <Button
                   variant={showChat ? "secondary" : "outline"}
                   size="sm"
@@ -5839,20 +5872,18 @@ function CasePage() {
                       className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} animate-messageSlide`}
                     >
                       <div
-                        className={`max-w-[85%] rounded-xl px-4 py-3 transition-all duration-300 ${
-                          m.role === "user"
+                        className={`max-w-[85%] rounded-xl px-4 py-3 transition-all duration-300 ${m.role === "user"
                             ? "bg-primary/15 border border-primary/30 shadow-[0_0_20px_rgba(251,191,36,0.1)]"
                             : "bg-secondary/80 border border-border shadow-lg"
-                        }`}
+                          }`}
                       >
                         <div className="flex items-center gap-2 mb-2">
                           <Badge
                             variant="outline"
-                            className={`text-[10px] mono uppercase ${
-                              m.role === "user"
+                            className={`text-[10px] mono uppercase ${m.role === "user"
                                 ? "bg-primary/20 text-primary border-primary/40"
                                 : "bg-accent/20 text-accent border-accent/40"
-                            }`}
+                              }`}
                           >
                             {m.role === "user" ? "Operator" : currentAgent?.shortName}
                           </Badge>
@@ -6051,11 +6082,10 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
                   <span className="font-mono font-bold text-[8px] px-1 bg-muted rounded text-muted-foreground uppercase mt-0.5 shrink-0">{cause.category}</span>
                   <span className="font-medium text-foreground">{cause.description}</span>
                   {cause.likelihood && (
-                    <Badge variant="outline" className={`text-[8px] px-1 ml-auto shrink-0 font-mono ${
-                      cause.likelihood.toLowerCase() === "high"
+                    <Badge variant="outline" className={`text-[8px] px-1 ml-auto shrink-0 font-mono ${cause.likelihood.toLowerCase() === "high"
                         ? "bg-red-500/10 text-red-400 border-red-500/20"
                         : "bg-amber-500/10 text-amber-400 border-amber-500/20"
-                    }`}>
+                      }`}>
                       {cause.likelihood}
                     </Badge>
                   )}
@@ -6165,13 +6195,12 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
                     {cause.likelihood && (
                       <Badge
                         variant="outline"
-                        className={`ml-2 text-[10px] ${
-                          cause.likelihood === "High"
+                        className={`ml-2 text-[10px] ${cause.likelihood === "High"
                             ? "bg-[color:var(--signal-crit)]/20 text-[color:var(--signal-crit)]"
                             : cause.likelihood === "Medium"
                               ? "bg-[color:var(--signal-warn)]/20 text-[color:var(--signal-warn)]"
                               : "bg-[color:var(--signal-ok)]/20 text-[color:var(--signal-ok)]"
-                        }`}
+                          }`}
                       >
                         {cause.likelihood}
                       </Badge>
@@ -6292,16 +6321,16 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
       )}
 
       {(keys.length <= 3 && !data.analysisType) ||
-      (JSON.stringify(data).length > 2000 &&
-        !data.fiveWhys &&
-        !data.fishbone &&
-        !data.topCauses &&
-        !data.rootCause &&
-        !data.correctiveActions &&
-        !data.preventiveActions &&
-        !data.reliabilityMetrics &&
-        !data.paretoAnalysis &&
-        !data.timeline) ? (
+        (JSON.stringify(data).length > 2000 &&
+          !data.fiveWhys &&
+          !data.fishbone &&
+          !data.topCauses &&
+          !data.rootCause &&
+          !data.correctiveActions &&
+          !data.preventiveActions &&
+          !data.reliabilityMetrics &&
+          !data.paretoAnalysis &&
+          !data.timeline) ? (
         <div className="bg-secondary/35 border border-border/40 rounded p-3 text-xs mono text-muted-foreground">
           <div className="flex items-center gap-1.5 text-primary mb-1 font-semibold">
             <Zap className="w-3.5 h-3.5" />

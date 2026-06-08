@@ -8,13 +8,13 @@ import {
   getAllCases,
   changeUserRole,
   deleteUser,
-  adminCreateUser,
   createInvite,
   getInvites,
   deleteInvite,
   adminResetPassword,
   AuthUser,
 } from "@/lib/auth";
+import { sendInvitationEmail } from "@/lib/mail";
 
 async function assertAdmin(user: AuthUser | null | undefined) {
   if (user?.role !== "admin") throw new Error("Forbidden — admin only");
@@ -89,31 +89,12 @@ export const adminDeleteUser = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-export const adminCreateOperator = createServerFn({ method: "POST" })
-  .middleware([requireAuth])
-  .inputValidator((input) =>
-    z
-      .object({
-        email: z.string().email(),
-        password: z.string().min(8),
-        fullName: z.string().max(100),
-        role: z.enum(["admin", "user"]),
-      })
-      .parse(input),
-  )
-  .handler(async ({ data, context }) => {
-    const { user } = context;
-    await assertAdmin(user);
-    const newOperator = await adminCreateUser(data.email, data.password, data.fullName, data.role);
-    return { ok: true, user: newOperator };
-  });
-
 export const adminGenerateInvite = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input) =>
     z
       .object({
-        email: z.string().email().optional().nullable(),
+        email: z.string().email(),
         role: z.enum(["admin", "user"]),
       })
       .parse(input),
@@ -121,9 +102,15 @@ export const adminGenerateInvite = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const invite = createInvite(data.email || null, data.role, user.id);
+    const invite = createInvite(data.email, data.role, user.id);
+    await sendInvitationEmail({
+      to: data.email,
+      code: invite.code,
+      role: data.role,
+    });
     return invite;
   });
+
 
 export const adminListInvites = createServerFn({ method: "GET" })
   .middleware([requireAuth])
