@@ -56,6 +56,7 @@ function AdminPage() {
   const [expandedUser, setExpandedUser] = useState<string | null>(null);
   const [resettingUser, setResettingUser] = useState<DbUserRow | null>(null);
   const [newPassword, setNewPassword] = useState("");
+  const [bulkPreview, setBulkPreview] = useState<{ emails: string[]; role: "admin" | "user" } | null>(null);
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["adm-stats"] });
@@ -500,62 +501,172 @@ function AdminPage() {
               <Button type="submit" disabled={generateInvite.isPending} className="w-full mt-2">
                 {generateInvite.isPending ? "Generating & Sending…" : "Generate & Send Invitation"}
               </Button>
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const fd = new FormData(e.currentTarget);
-                  const textarea = fd.get("bulk-textarea") as string;
-                  const role = fd.get("bulk-role") as "admin" | "user";
-                  bulkInvite.mutate(
-                    { textarea, role },
-                    {
-                      onSuccess: (res) => {
-                        const r = res as { results: Array<{ email: string; code: string; ok: boolean }> };
-                        const ok = r.results.filter((x) => x.ok).length;
-                        const fail = r.results.filter((x) => !x.ok).length;
-                        toast.success(`${ok} invite(s) generated${fail > 0 ? `, ${fail} failed` : ""}`);
-                      },
-                      onError: (err: unknown) => {
-                        const message = err instanceof Error ? err.message : String(err);
-                        toast.error(message || "Bulk invite failed");
-                      },
-                    },
-                  );
-                }}
-                className="mt-4 pt-4 border-t border-border/50 space-y-3"
-              >
-                <div className="space-y-1.5">
-                  <Label>Bulk Import</Label>
-                  <Textarea
-                    name="bulk-textarea"
-                    required
-                    rows={6}
-                    placeholder="Paste contacts below (semicolon separated, email is last token per entry)&#10;&#10;e.g. Manish Motwani Manish.Motwani@vedanta.co.in; Montu Makwana Montu.Makwana@vedanta.co.in;"
-                  />
-                  <p className="text-[10px] text-muted-foreground mono">
-                    // Format per entry: Name Lastname email@domain.com — separate entries with ;
-                  </p>
-                </div>
-                <div className="flex gap-2 items-end">
-                  <div className="flex-1 space-y-1.5">
-                    <Label htmlFor="bulk-role">Grant Role</Label>
-                    <select
-                      id="bulk-role"
-                      name="bulk-role"
-                      className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value="user">User (Operator)</option>
-                      <option value="admin">Administrator</option>
-                    </select>
-                  </div>
-                  <Button type="submit" disabled={bulkInvite.isPending} className="mb-0">
-                    {bulkInvite.isPending ? "Processing…" : "Bulk Import & Send"}
-                  </Button>
-                </div>
-              </form>
             </form>
           </div>
+
+          {/* Bulk Import */}
+          <div className="panel max-w-xl mx-auto">
+            <div className="panel-header">
+              <span>// BULK IMPORT CONTACTS</span>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="bulk-textarea">Contacts (semicolon separated)</Label>
+                <Textarea
+                  id="bulk-textarea"
+                  name="bulk-textarea"
+                  required
+                  rows={8}
+                  placeholder="Paste contacts below (semicolon separated, email is last token per entry)&#10;&#10;e.g. Manish Motwani Manish.Motwani@vedanta.co.in; Montu Makwana Montu.Makwana@vedanta.co.in;"
+                />
+                <p className="text-[10px] text-muted-foreground mono">
+                  // Format per entry: Firstname Lastname email@domain.com — separate entries with ;
+                </p>
+              </div>
+              <div className="flex gap-3 items-end">
+                <div className="space-y-1.5 flex-1">
+                  <Label htmlFor="bulk-role">Grant Role</Label>
+                  <select
+                    id="bulk-role"
+                    className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    <option value="user">User (Operator)</option>
+                    <option value="admin">Administrator</option>
+                  </select>
+                </div>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    const textarea = (document.getElementById("bulk-textarea") as HTMLTextAreaElement)?.value;
+                    const role = (document.getElementById("bulk-role") as HTMLSelectElement)?.value;
+                    if (!textarea?.trim()) {
+                      toast.error("Paste contacts into the textarea first");
+                      return;
+                    }
+                    const entries = textarea.split(";").map((s) => s.trim()).filter(Boolean);
+                    const emails: string[] = [];
+                    for (const entry of entries) {
+                      const parts = entry.split(/\s+/);
+                      const rawEmail = parts.length >= 2 ? parts[parts.length - 1] : parts[0];
+                      const email = rawEmail.replace(/[;]$/, "").trim();
+                      if (email.includes("@") && email.includes(".")) {
+                        emails.push(email);
+                      }
+                    }
+                    if (emails.length === 0) {
+                      toast.error("No valid emails found in the input");
+                      return;
+                    }
+                    setBulkPreview({ emails, role: role as "admin" | "user" });
+                  }}
+                >
+                  Parse & Preview
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Bulk Preview Modal */}
+          {bulkPreview && (
+            <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="panel w-full max-w-2xl animate-fadeIn" style={{ maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
+                <div className="panel-header">
+                  <span>// BULK IMPORT PREVIEW</span>
+                  <button
+                    onClick={() => setBulkPreview(null)}
+                    className="text-muted-foreground hover:text-foreground"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="p-6 space-y-4" style={{ overflow: "auto" }}>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm mono">
+                        <span className="text-[color:var(--signal-ok)] font-bold text-lg">{bulkPreview.emails.length}</span>{" "}
+                        email(s) detected
+                      </p>
+                      <p className="text-xs text-muted-foreground mono">
+                        Role: {bulkPreview.role === "admin" ? "Administrator" : "Operator (User)"}
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          const textareaRef = document.getElementById("bulk-textarea") as HTMLTextAreaElement;
+                          if (textareaRef) textareaRef.value = bulkPreview.emails.join("; ");
+                          setBulkPreview({ ...bulkPreview });
+                        }}
+                      >
+                        Edit Input
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="border border-border rounded-md max-h-[45vh] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="sticky top-0 bg-card border-b border-border text-xs uppercase text-muted-foreground mono">
+                        <tr>
+                          <th className="text-left p-2 w-10">#</th>
+                          <th className="text-left p-2">Email</th>
+                          <th className="text-right p-2">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bulkPreview.emails.map((email, idx) => (
+                          <tr key={`${email}-${idx}`} className="border-b border-border/30">
+                            <td className="p-2 text-muted-foreground mono text-xs">{idx + 1}</td>
+                            <td className="p-2 mono text-xs">{email}</td>
+                            <td className="p-2 text-right">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => {
+                                  const updated = bulkPreview.emails.filter((_, i) => i !== idx);
+                                  setBulkPreview({ ...bulkPreview, emails: updated });
+                                }}
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-destructive" />
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex gap-2 justify-end pt-2">
+                    <Button variant="ghost" onClick={() => setBulkPreview(null)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      disabled={bulkInvite.isPending || bulkPreview.emails.length === 0}
+                      onClick={() => {
+                        bulkInvite.mutate(
+                          { textarea: bulkPreview.emails.join(";"), role: bulkPreview.role },
+                          {
+                            onSuccess: (res) => {
+                              const r = res as { results: Array<{ email: string; code: string; ok: boolean }> };
+                              const ok = r.results.filter((x) => x.ok).length;
+                              const fail = r.results.filter((x) => !x.ok).length;
+                              toast.success(`${ok} invite(s) sent${fail > 0 ? `, ${fail} failed` : ""}`);
+                              setBulkPreview(null);
+                            },
+                            onError: (err: unknown) => {
+                              const message = err instanceof Error ? err.message : String(err);
+                              toast.error(message || "Bulk invite failed");
+                            },
+                          },
+                        );
+                      }}
+                    >
+                      {bulkInvite.isPending ? `Sending… ${bulkInvite.isPending ? "" : ""}` : `Confirm & Send ${bulkPreview.emails.length} Invite(s)`}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="panel">
             <div className="panel-header">
