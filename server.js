@@ -14,6 +14,16 @@ if (existsSync(envPath)) {
   process.loadEnvFile(envPath);
 }
 
+// Resolve relative DATABASE_PATH to absolute, anchored to the project root.
+// This ensures the DB is found regardless of what CWD is when the process starts
+// (e.g. when launched via systemd, Docker, or a wrapper script from another directory).
+{
+  const dbPath = process.env.DATABASE_PATH || "./data/app.db";
+  if (!dbPath.startsWith("/")) {
+    process.env.DATABASE_PATH = join(__dirname, dbPath);
+  }
+}
+
 const distServer = join(__dirname, "dist", "server");
 const distClient = join(__dirname, "dist", "client");
 
@@ -118,7 +128,17 @@ const server = createServer(async (req, res) => {
   }
 });
 
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`  DATABASE_PATH = ${process.env.DATABASE_PATH}`);
+  console.log(`  BASE_URL      = ${process.env.BASE_URL || "(not set)"}`);
+  console.log(`  NODE_ENV      = ${process.env.NODE_ENV || "production"}`);
 });

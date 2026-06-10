@@ -236,7 +236,7 @@ function AdminPage() {
           {/* Agent usage summary */}
           <div className="panel">
             <div className="panel-header">
-              <span>// AGENT WORKLOAD STATS</span>
+              <span>AGENT WORKLOAD STATS</span>
             </div>
             {stats.data?.agentUsage?.length === 0 ? (
               <p className="p-4 text-sm text-muted-foreground mono">
@@ -265,7 +265,7 @@ function AdminPage() {
           {/* Cases */}
           <div className="panel">
             <div className="panel-header">
-              <span>// ALL ROOT CAUSE CASES</span>
+              <span>ALL ROOT CAUSE CASES</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -290,7 +290,7 @@ function AdminPage() {
                     (cases.data?.cases ?? []).map((c: DbCaseRow) => (
                       <tr key={c.id} className="border-b border-border/50">
                         <td className="p-3 font-medium">{c.title}</td>
-                        <td className="p-3 mono text-xs">{c.owner?.email || "// SYSTEM"}</td>
+                        <td className="p-3 mono text-xs">{c.owner?.email || "SYSTEM"}</td>
                         <td className="p-3 mono text-xs">{c.asset_id ?? "none"}</td>
                         <td className="p-3">
                           <span
@@ -328,7 +328,7 @@ function AdminPage() {
           {/* User management list */}
           <div className="panel">
             <div className="panel-header">
-              <span>// ACTIVE OPERATORS</span>
+              <span>ACTIVE OPERATORS</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -464,7 +464,7 @@ function AdminPage() {
           {/* Invites Management */}
           <div className="panel max-w-xl mx-auto">
             <div className="panel-header">
-              <span>// GENERATE & SEND REGISTRATION INVITE</span>
+              <span>GENERATE <span>// GENERATE & SEND REGISTRATION INVITE</span> SEND REGISTRATION INVITE</span>
             </div>
             <form
               onSubmit={(e) => {
@@ -528,7 +528,7 @@ function AdminPage() {
           {/* Bulk Import */}
           <div className="panel max-w-xl mx-auto">
             <div className="panel-header">
-              <span>// BULK IMPORT CONTACTS</span>
+              <span>BULK IMPORT CONTACTS</span>
             </div>
             <div className="p-6 space-y-4">
               <div className="space-y-1.5">
@@ -592,7 +592,7 @@ function AdminPage() {
             <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="panel w-full max-w-2xl animate-fadeIn" style={{ maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
                 <div className="panel-header">
-                  <span>// BULK IMPORT PREVIEW</span>
+                  <span>BULK IMPORT PREVIEW</span>
                   <button
                     onClick={() => setBulkPreview(null)}
                     className="text-muted-foreground hover:text-foreground"
@@ -691,7 +691,7 @@ function AdminPage() {
 
           <div className="panel">
             <div className="panel-header">
-              <span>// PENDING REGISTRATION INVITES</span>
+              <span>PENDING REGISTRATION INVITES</span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -797,7 +797,7 @@ function AdminPage() {
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="panel w-full max-w-md animate-fadeIn">
             <div className="panel-header">
-              <span>// RESET OPERATOR PASSWORD</span>
+              <span>RESET OPERATOR PASSWORD</span>
               <button
                 onClick={() => setResettingUser(null)}
                 className="text-muted-foreground hover:text-foreground"

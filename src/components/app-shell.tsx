@@ -174,7 +174,7 @@ export function AuthGate({
   if (loading)
     return (
       <div className="min-h-screen flex items-center justify-center text-muted-foreground mono text-sm">
-        // initializing…
+        Initializing…
       </div>
     );
   if (!user) return null;

@@ -307,7 +307,7 @@ function DashboardPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">RCA Cases</h1>
-          <p className="text-sm text-muted-foreground mono">// {cases.length} total incidents</p>
+          <p className="text-sm text-muted-foreground mono">{cases.length} total incidents</p>
         </div>
         <Button onClick={() => setShowNew((v) => !v)}>
           <Plus className="w-4 h-4 mr-2" />
@@ -318,11 +318,11 @@ function DashboardPage() {
       {showNew && (
         <div className="panel">
           <div className="panel-header">
-            <span>// NEW INCIDENT</span>
+            <span>NEW INCIDENT</span>
           </div>
           <div className="p-4 space-y-4">
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground mono">// TITLE</label>
+              <label className="text-xs text-muted-foreground mono">TITLE</label>
               <Input
                 placeholder="Incident title (e.g. Furnace-01 trip due to Zone 3 overheating)"
                 value={title}
@@ -330,7 +330,7 @@ function DashboardPage() {
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground mono">// ASSET ID</label>
+              <label className="text-xs text-muted-foreground mono">ASSET ID</label>
               <Input
                 placeholder="Asset ID (optional, e.g. FURN-01)"
                 value={assetId}
@@ -338,7 +338,7 @@ function DashboardPage() {
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground mono">// INITIAL PROBLEM DETAILS / SYMPTOMS (PASTE IMAGES HERE ALSO)</label>
+              <label className="text-xs text-muted-foreground mono">INITIAL PROBLEM DETAILS / SYMPTOMS (PASTE IMAGES HERE ALSO)</label>
               <Textarea
                 placeholder="Describe the symptoms, initial observations, sequence of alarms, etc. You can paste screenshots here directly."
                 value={description}
@@ -350,7 +350,7 @@ function DashboardPage() {
             </div>
             <div className="space-y-2">
               <label className="text-xs text-muted-foreground mono flex items-center gap-1">
-                <Paperclip className="w-3.5 h-3.5" /> // ATTACH FILES (photos, docs, reports)
+                <Paperclip className="w-3.5 h-3.5" /> ATTACH FILES (photos, docs, reports)
               </label>
               <input
                 type="file"
@@ -406,7 +406,7 @@ function DashboardPage() {
                 <div className="flex items-center justify-between border-b border-border/40 pb-2">
                   <div className="flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-primary animate-pulse" />
-                    <span className="text-sm font-bold mono uppercase">// AI Incident Pre-Analysis Findings</span>
+                    <span className="text-sm font-bold mono uppercase">AI Incident Pre-Analysis Findings</span>
                   </div>
                   {preAnalyzeMut.isPending ? (
                     <span className="flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 bg-primary/10 text-primary rounded border border-primary/30 animate-pulse">
@@ -426,7 +426,7 @@ function DashboardPage() {
 
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground mono">// PROBLEM STATEMENT</label>
+                    <label className="text-xs text-muted-foreground mono">PROBLEM STATEMENT</label>
                     {preAnalyzeMut.isPending && !editProblemStatement ? (
                       <div className="min-h-[72px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
                         <div className="h-3 w-full rounded bg-muted/60 animate-pulse" />
@@ -447,7 +447,7 @@ function DashboardPage() {
                     )}
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground mono">// OPERATIONAL EFFECT / IMPACT</label>
+                    <label className="text-xs text-muted-foreground mono">OPERATIONAL EFFECT / IMPACT</label>
                     {preAnalyzeMut.isPending && !editEffect ? (
                       <div className="min-h-[72px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
                         <div className="h-3 w-full rounded bg-muted/60 animate-pulse" />
@@ -471,7 +471,7 @@ function DashboardPage() {
 
                 <div className="grid md:grid-cols-2 gap-4">
                   <div className="space-y-1">
-                    <label className="text-xs text-primary mono">// GAPS & UNRESOLVED QUESTIONS (ONE PER LINE)</label>
+                    <label className="text-xs text-primary mono">GAPS & UNRESOLVED QUESTIONS (ONE PER LINE)</label>
                     {preAnalyzeMut.isPending && !editGaps ? (
                       <div className="min-h-[96px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
                         <div className="h-2.5 w-4/5 rounded bg-muted/60 animate-pulse" />
@@ -493,7 +493,7 @@ function DashboardPage() {
                     )}
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs text-accent mono">// SUGGESTED FOLLOW-UPS (ONE PER LINE)</label>
+                    <label className="text-xs text-accent mono">SUGGESTED FOLLOW-UPS (ONE PER LINE)</label>
                     {preAnalyzeMut.isPending && !editFollowUps ? (
                       <div className="min-h-[96px] rounded-md border border-border/50 bg-background/50 p-3 space-y-2">
                         <div className="h-2.5 w-3/4 rounded bg-muted/60 animate-pulse" />
@@ -585,7 +585,7 @@ function DashboardPage() {
       )}
 
       {isLoading ? (
-        <p className="text-muted-foreground mono text-sm">// loading cases…</p>
+        <p className="text-muted-foreground mono text-sm">Loading cases…</p>
       ) : cases.length === 0 ? (
         <div className="panel p-10 text-center">
           <FileText className="w-10 h-10 text-muted-foreground mx-auto mb-3" />
@@ -598,7 +598,7 @@ function DashboardPage() {
           {cases.map((c: any) => (
             <div key={c.id} className="panel hover:border-primary/50 transition-colors group">
               <div className="panel-header">
-                <span>// {c.asset_id ?? "no asset"}</span>
+                <span>{c.asset_id ?? "no asset"}</span>
                 <span className="flex items-center gap-1">
                   {c.status === "completed" ? (
                     <CheckCircle2 className="w-3 h-3 text-[color:var(--signal-ok)]" />

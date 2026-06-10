@@ -30,7 +30,7 @@ function LoginPage() {
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="panel w-full max-w-md">
         <div className="panel-header">
-          <span>// SECURE TERMINAL ACCESS</span>
+          <span>SECURE TERMINAL ACCESS</span>
           <span className="status-dot text-[color:var(--signal-ok)]" />
         </div>
         <form onSubmit={onSubmit} className="p-6 space-y-4">

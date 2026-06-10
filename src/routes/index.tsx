@@ -13,7 +13,7 @@ function Index() {
   }, [user, loading, nav]);
   return (
     <div className="min-h-screen flex items-center justify-center text-muted-foreground mono text-sm">
-      // routing…
+      Routing…
     </div>
   );
 }
