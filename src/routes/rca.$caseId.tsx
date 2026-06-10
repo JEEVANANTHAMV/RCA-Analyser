@@ -15,6 +15,7 @@ import {
   updateCaseIncidentData,
   updateAssistantMessage,
   clearConversationMessages,
+  truncateMessagesAfter,
   runFullAutomation,
   downloadRcaReport,
   exportFullAnalysis,
@@ -319,6 +320,7 @@ function CasePage() {
   const [streamingChatText, setStreamingChatText] = useState<string | null>(null);
   const [agentParsedData, setAgentParsedData] = useState<Record<string, any>>({});
   const [selectedCauseId, setSelectedCauseId] = useState<string>("");
+  const [selectedCauseIds, setSelectedCauseIds] = useState<string[]>([]);
   const [customCauseText, setCustomCauseText] = useState<string>("");
   const [isDirty, setIsDirty] = useState(false);
 
@@ -576,6 +578,7 @@ function CasePage() {
   });
 
   const clearChatFn = useServerFn(clearConversationMessages);
+  const truncateMsgsFn = useServerFn(truncateMessagesAfter);
   const clearChatMut = useMutation({
     mutationFn: async () => {
       const cid = convIdRef.current;
@@ -1395,7 +1398,7 @@ function CasePage() {
             </div>
           </div>
           <div className="text-center space-y-2 max-w-md">
-            <h3 className="text-lg font-bold mono">// PIPELINE ANALYSIS RUNNING</h3>
+            <h3 className="text-lg font-bold mono">PIPELINE ANALYSIS RUNNING</h3>
             <p className="text-sm text-muted-foreground">
               {currentAgent.name} is consuming preceding responses, synthesizing hypotheses, and drawing diagnostic diagrams...
             </p>
@@ -1451,7 +1454,7 @@ function CasePage() {
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <div className="flex items-center gap-2">
                 <span className={`h-2 w-2 rounded-full ${editLocked ? "bg-red-500" : "bg-emerald-500 animate-ping"}`} />
-                <h3 className="font-bold text-lg mono uppercase">// Data Collector & Validator</h3>
+                <h3 className="font-bold text-lg mono uppercase">Data Collector & Validator</h3>
               </div>
               <Badge className={editLocked ? "bg-red-500/20 text-red-400 border-red-500/40" : "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"}>
                 {editLocked ? "STATUS: APPROVED & LOCKED" : "STATUS: DRAFT (EDITABLE)"}
@@ -1744,6 +1747,7 @@ function CasePage() {
                     possibleCauses: parsed.possibleCauses || [],
                     operatorInstruction: parsed.operatorInstruction || "",
                     selectedAnswer: selected,
+                    messageId: m.id,
                   });
                 }
               } catch { }
@@ -1778,10 +1782,30 @@ function CasePage() {
 
         const currentStep = interactiveSteps.find(s => !s.selectedAnswer);
 
+        const isFirstStep = interactiveSteps.indexOf(currentStep) === 0;
+        const ftaAgentIdx = AGENTS.findIndex(a => a.key === "fault_tree");
+
         const submitResponse = () => {
           if (!currentStep) return;
           let answerText = "";
-          if (selectedCauseId === "custom") {
+          let isMultiCause = false;
+
+          if (isFirstStep && selectedCauseIds.length > 0) {
+            const selectedCauses = currentStep.possibleCauses.filter((c: any) =>
+              selectedCauseIds.includes(c.id)
+            );
+            if (selectedCauseIds.includes("custom") && customCauseText.trim()) {
+              selectedCauses.push({ id: "custom", description: customCauseText.trim() });
+            }
+            if (selectedCauses.length === 0) {
+              toast.error("Please select at least one cause.");
+              return;
+            }
+            isMultiCause = selectedCauses.length > 1;
+            answerText = selectedCauses.length === 1
+              ? `I select ${selectedCauses[0].id}: ${selectedCauses[0].description}`
+              : `Multiple root causes identified:\n${selectedCauses.map((c: any) => `- ${c.description}`).join("\n")}`;
+          } else if (selectedCauseId === "custom") {
             if (!customCauseText.trim()) {
               toast.error("Please enter a custom explanation.");
               return;
@@ -1802,8 +1826,13 @@ function CasePage() {
           sendMut.mutate(answerText, {
             onSuccess: () => {
               setSelectedCauseId("");
+              setSelectedCauseIds([]);
               setCustomCauseText("");
               qc.invalidateQueries({ queryKey: ["msgs", convId] });
+              if (isMultiCause && ftaAgentIdx !== -1) {
+                toast.info("Multiple causes detected — navigating to Fault Tree Analysis");
+                setTimeout(() => goToAgent(ftaAgentIdx), 800);
+              }
             }
           });
         };
@@ -1826,7 +1855,7 @@ function CasePage() {
           <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <div>
-                <h3 className="font-bold text-lg mono uppercase">// 5 Why Root Cause Investigation</h3>
+                <h3 className="font-bold text-lg mono uppercase">5 Why Root Cause Investigation</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">Guided recursive cause-and-effect questioning to locate physical root cause.</p>
               </div>
               {interactiveSteps.length > 0 && (
@@ -1894,12 +1923,19 @@ function CasePage() {
                               </div>
                               <div className="flex gap-2 pt-1 border-t border-emerald-500/10">
                                 <button
-                                  onClick={() => {
-                                    const updatedSteps = interactiveSteps.map((s, si) =>
-                                      si === idx ? { ...s, selectedAnswer: "" } : s
-                                    );
-                                    setFiveWhys(updatedSteps.map(s => ({ question: s.question, answer: s.selectedAnswer || "", evidence: s.evidence, isValidRootCause: s.isValidRootCause })));
-                                    toast.info("Answer reset — you can re-answer");
+                                  onClick={async () => {
+                                    if (!convId || !step.messageId) return;
+                                    try {
+                                      await truncateMsgsFn({
+                                        data: { conversationId: convId, afterMessageId: step.messageId },
+                                      });
+                                      setSelectedCauseId("");
+                                      setCustomCauseText("");
+                                      qc.invalidateQueries({ queryKey: ["msgs", convId] });
+                                      toast.info("Answer reset — you can re-answer");
+                                    } catch {
+                                      toast.error("Failed to reset answer");
+                                    }
                                   }}
                                   className="text-xs px-3 py-1.5 rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 transition-all font-mono"
                                 >
@@ -1917,28 +1953,50 @@ function CasePage() {
                             {step.possibleCauses && step.possibleCauses.length > 0 ? (
                               <div className="space-y-4">
                                 <div className="space-y-2">
-                                  <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT A CAUSE OR CHOOSE CUSTOM</label>
+                                  {idx === 0 ? (
+                                    <div className="flex items-center justify-between">
+                                      <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT ONE OR MORE CAUSES</label>
+                                      <span className="text-[9px] text-primary font-mono bg-primary/10 border border-primary/20 px-2 py-0.5 rounded">Multi-select — triggers FTA if multiple</span>
+                                    </div>
+                                  ) : (
+                                    <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT A CAUSE OR CHOOSE CUSTOM</label>
+                                  )}
                                   <div className="grid gap-2">
                                     {step.possibleCauses.map((cause: any) => {
-                                      const isSelected = selectedCauseId === cause.id;
+                                      const isSelected = idx === 0
+                                        ? selectedCauseIds.includes(cause.id)
+                                        : selectedCauseId === cause.id;
                                       return (
                                         <button
                                           key={cause.id}
                                           type="button"
                                           disabled={sendMut.isPending}
                                           onClick={() => {
-                                            setSelectedCauseId(cause.id);
-                                            setCustomCauseText("");
+                                            if (idx === 0) {
+                                              setSelectedCauseIds(prev =>
+                                                prev.includes(cause.id)
+                                                  ? prev.filter(id => id !== cause.id)
+                                                  : [...prev, cause.id]
+                                              );
+                                            } else {
+                                              setSelectedCauseId(cause.id);
+                                              setCustomCauseText("");
+                                            }
                                           }}
                                           className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected
                                               ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                               : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                             }`}
                                         >
-                                          <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary" : "border-muted-foreground/30"
-                                            }`}>
-                                            {isSelected && <div className="w-2 h-2 rounded-full bg-primary" />}
-                                          </div>
+                                          {idx === 0 ? (
+                                            <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
+                                              {isSelected && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
+                                            </div>
+                                          ) : (
+                                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary" : "border-muted-foreground/30"}`}>
+                                              {isSelected && <div className="w-2 h-2 rounded-full bg-primary" />}
+                                            </div>
+                                          )}
                                           <div className="flex-1 space-y-1">
                                             <div className="flex items-center gap-2">
                                               <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">{cause.category}</span>
@@ -1955,17 +2013,30 @@ function CasePage() {
                                       type="button"
                                       disabled={sendMut.isPending}
                                       onClick={() => {
-                                        setSelectedCauseId("custom");
+                                        if (idx === 0) {
+                                          setSelectedCauseIds(prev =>
+                                            prev.includes("custom")
+                                              ? prev.filter(id => id !== "custom")
+                                              : [...prev, "custom"]
+                                          );
+                                        } else {
+                                          setSelectedCauseId("custom");
+                                        }
                                       }}
-                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${selectedCauseId === "custom"
+                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${(idx === 0 ? selectedCauseIds.includes("custom") : selectedCauseId === "custom")
                                           ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                           : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                         }`}
                                     >
-                                      <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseId === "custom" ? "border-primary" : "border-muted-foreground/30"
-                                        }`}>
-                                        {selectedCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-primary" />}
-                                      </div>
+                                      {idx === 0 ? (
+                                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseIds.includes("custom") ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
+                                          {selectedCauseIds.includes("custom") && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
+                                        </div>
+                                      ) : (
+                                        <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseId === "custom" ? "border-primary" : "border-muted-foreground/30"}`}>
+                                          {selectedCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-primary" />}
+                                        </div>
+                                      )}
                                       <div className="flex-1 space-y-1">
                                         <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">Custom</span>
                                         <p className="text-xs font-semibold text-foreground">Write a custom explanation/cause for this step</p>
@@ -1974,7 +2045,7 @@ function CasePage() {
                                   </div>
                                 </div>
 
-                                {selectedCauseId === "custom" && (
+                                {(selectedCauseId === "custom" || (idx === 0 && selectedCauseIds.includes("custom"))) && (
                                   <div className="space-y-2 animate-fadeIn">
                                     <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">WRITE CUSTOM EXPLANATION</label>
                                     <Textarea
@@ -1987,6 +2058,13 @@ function CasePage() {
                                       rows={2}
                                       className="text-xs font-mono bg-background/50 border-border/50 focus:border-primary/50"
                                     />
+                                  </div>
+                                )}
+
+                                {idx === 0 && selectedCauseIds.length > 1 && (
+                                  <div className="flex items-center gap-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-mono">
+                                    <span className="font-bold">{selectedCauseIds.length} causes selected</span>
+                                    <span className="text-muted-foreground">— submitting will auto-route to Fault Tree Analysis</span>
                                   </div>
                                 )}
                               </div>
@@ -2015,7 +2093,7 @@ function CasePage() {
                               <div className="flex justify-end pt-2">
                                 <Button
                                   variant="default"
-                                  disabled={sendMut.isPending || step.isStreaming || (!selectedCauseId && !customCauseText.trim())}
+                                  disabled={sendMut.isPending || step.isStreaming || (idx === 0 ? selectedCauseIds.length === 0 : (!selectedCauseId && !customCauseText.trim()))}
                                   onClick={submitResponse}
                                   className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
                                 >
@@ -2260,7 +2338,7 @@ function CasePage() {
                 </div>
               </div>
               <div className="text-center space-y-2 max-w-md">
-                <h3 className="text-lg font-bold mono">// FISHBONE AGENT INITIATING</h3>
+                <h3 className="text-lg font-bold mono">FISHBONE AGENT INITIATING</h3>
                 <p className="text-sm text-muted-foreground">
                   Fishbone agent is loading context from previous steps and preparing Step 1: Problem Confirmation...
                 </p>
@@ -2304,7 +2382,7 @@ function CasePage() {
             <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
               <div className="flex items-center justify-between border-b border-border/60 pb-3">
                 <div>
-                  <h3 className="font-bold text-lg mono uppercase">// Fishbone Guided Investigation</h3>
+                  <h3 className="font-bold text-lg mono uppercase">Fishbone Guided Investigation</h3>
                   <p className="text-xs text-muted-foreground mt-0.5">Iteratively construct a 6M Cause-and-Effect diagram with AI guidance.</p>
                 </div>
                 <div className="flex gap-2">
@@ -3216,7 +3294,7 @@ function CasePage() {
         return (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Ishikawa Fishbone Diagram</h3>
+              <h3 className="font-bold text-lg mono uppercase">Ishikawa Fishbone Diagram</h3>
               <div className="flex gap-2 items-center">
                 <input
                   type="text"
@@ -3289,7 +3367,7 @@ function CasePage() {
                 </svg>
 
                 <div className="absolute right-20 top-[110px] w-64 bg-background/90 border border-destructive/40 p-2.5 rounded-lg shadow-lg text-[11px]">
-                  <span className="text-destructive font-mono uppercase font-bold tracking-wide">// Incident Spine Head</span>
+                  <span className="text-destructive font-mono uppercase font-bold tracking-wide">Incident Spine Head</span>
                   <p className="font-semibold text-foreground truncate mt-1">{editProblemStatement || parsedData.problemStatement || "System anomaly event"}</p>
                 </div>
               </div>
@@ -3415,7 +3493,7 @@ function CasePage() {
                 <Layers className="w-8 h-8" />
               </div>
               <div className="space-y-2 max-w-sm">
-                <h4 className="text-sm font-bold mono uppercase">// FAULT TREE PENDING</h4>
+                <h4 className="text-sm font-bold mono uppercase">FAULT TREE PENDING</h4>
                 <p className="text-xs text-muted-foreground">The Fault Tree agent hasn't generated a tree yet. Click "Run Analysis" above to generate the initial fault tree diagram, or use the Chat Console to ask the FTA agent to begin.</p>
               </div>
             </div>
@@ -3643,7 +3721,7 @@ function CasePage() {
         return (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Logical Fault Tree Analysis (FTA)</h3>
+              <h3 className="font-bold text-lg mono uppercase">Logical Fault Tree Analysis (FTA)</h3>
               <Button size="sm" onClick={saveFaultTree} disabled={updateAgentMsgMut.isPending}>
                 {updateAgentMsgMut.isPending ? "Saving..." : "Save Findings"}
               </Button>
@@ -3895,7 +3973,7 @@ function CasePage() {
                 return (
                   <div key={i} className="p-3 border-b border-border/20 text-xs">
                     {(parsed?.tree || parsed?.faultTreeAnalysis) ? (
-                      <p className="text-muted-foreground font-mono">// Fault tree analysis updated ✓</p>
+                      <p className="text-muted-foreground font-mono">Fault tree analysis updated ✓</p>
                     ) : (
                       <p className="text-muted-foreground whitespace-pre-wrap">{m.content.slice(0, 300)}{m.content.length > 300 ? '...' : ''}</p>
                     )}
@@ -3972,7 +4050,7 @@ function CasePage() {
         return (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Pareto Analytics Dashboard</h3>
+              <h3 className="font-bold text-lg mono uppercase">Pareto Analytics Dashboard</h3>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={downloadCSV}>
                   <Download className="w-3.5 h-3.5 mr-1.5" /> Export CSV
@@ -3999,7 +4077,7 @@ function CasePage() {
                   <Percent className="w-6 h-6 animate-pulse" />
                 </div>
                 <div>
-                  <h4 className="text-sm font-bold text-amber-400 uppercase tracking-wide">// Calculated Vital Few ({paretoThreshold}% Cutoff)</h4>
+                  <h4 className="text-sm font-bold text-amber-400 uppercase tracking-wide">Calculated Vital Few ({paretoThreshold}% Cutoff)</h4>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     Addressing these key issues will eliminate {paretoThreshold}% of the recurring failures:
                   </p>
@@ -4224,7 +4302,7 @@ function CasePage() {
         return (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Chronological sequence of events</h3>
+              <h3 className="font-bold text-lg mono uppercase">Chronological sequence of events</h3>
               <div className="flex gap-2">
                 <Button size="sm" onClick={addPhase}>
                   <Plus className="w-3.5 h-3.5 mr-1" /> Insert Phase
@@ -4597,7 +4675,7 @@ function CasePage() {
             {showAddPhaseModal && (
               <div className="fixed inset-0 bg-background/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
                 <div className="bg-card border border-border rounded-xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-200">
-                  <h3 className="font-bold text-base mono text-primary tracking-wide">// ADD TIMELINE PHASE</h3>
+                  <h3 className="font-bold text-base mono text-primary tracking-wide">ADD TIMELINE PHASE</h3>
                   <div className="space-y-3">
                     <div className="space-y-1">
                       <label className="text-[10px] text-muted-foreground font-mono">PHASE NAME</label>
@@ -4675,7 +4753,7 @@ function CasePage() {
         return (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-lg mono uppercase">// Equipment Reliability & Asset Diagnostics</h3>
+              <h3 className="font-bold text-lg mono uppercase">Equipment Reliability & Asset Diagnostics</h3>
               <div className="flex gap-2">
                 <Button size="sm" onClick={() => {
                   const updatedPayload = {
@@ -4797,7 +4875,7 @@ function CasePage() {
 
             {/* Diagnostics Component RPN List & Risk Sliders */}
             <div className="bg-secondary/25 border border-border/60 rounded-xl p-5 space-y-4">
-              <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-muted-foreground">// Subcomponent Diagnostics & RPN (Risk Priority Number) profiles</h4>
+              <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-muted-foreground">Subcomponent Diagnostics & RPN (Risk Priority Number) profiles</h4>
               <div className="grid md:grid-cols-3 gap-6">
                 {[
                   { key: "probe", name: "Temperature Transducer Probe", health: "NOMINAL", desc: "Sensors checking nozzle temp." },
@@ -4957,7 +5035,7 @@ function CasePage() {
 
             {/* ══ Top bar ══ */}
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <h3 className="font-bold text-base mono uppercase tracking-wide">// Full RCA Analysis — All 8 Steps</h3>
+              <h3 className="font-bold text-base mono uppercase tracking-wide">Full RCA Analysis — All 8 Steps</h3>
               <div className="flex gap-2">
                 <Button size="sm" onClick={saveReport} disabled={updateAgentMsgMut.isPending} variant="outline" className="h-7 text-xs">
                   {updateAgentMsgMut.isPending ? "Saving..." : "Save Edits"}
@@ -5392,7 +5470,7 @@ function CasePage() {
               <FileText className="w-8 h-8 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-semibold text-muted-foreground mono">// Agent Output Ready</p>
+              <p className="text-sm font-semibold text-muted-foreground mono">Agent Output Ready</p>
               <p className="text-xs text-muted-foreground">This agent has completed its analysis. Use the Chat Console to refine or ask follow-up questions.</p>
             </div>
           </div>
@@ -5426,7 +5504,7 @@ function CasePage() {
               ) : (
                 <Zap className="w-4 h-4 text-violet-400" />
               )}
-              <span className="font-bold text-sm mono">// FULL RCA AUTOMATION</span>
+              <span className="font-bold text-sm mono">FULL RCA AUTOMATION</span>
             </div>
             {!autoRunning && (
               <button
@@ -5451,7 +5529,7 @@ function CasePage() {
                   </p>
                 </div>
                 <div className="text-xs text-muted-foreground/70 bg-secondary/30 rounded-lg p-3 text-left space-y-1">
-                  <p className="font-mono font-semibold text-violet-400/80">// What happens:</p>
+                  <p className="font-mono font-semibold text-violet-400/80">What happens:</p>
                   <p>• Data Collector validates the incident</p>
                   <p>• 5-Why drills down to root cause (auto-answered)</p>
                   <p>• Fishbone builds the Ishikawa diagram (10-step auto-flow)</p>
@@ -5589,7 +5667,7 @@ function CasePage() {
       <div className="panel p-3">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-muted-foreground mono uppercase">
-            // RCA Analysis Pipeline
+            RCA Analysis Pipeline
           </span>
           <div className="flex items-center gap-1">
             <Badge variant="outline" className="text-xs mono">
@@ -5655,7 +5733,7 @@ function CasePage() {
         {/* Agent Sidebar */}
         <div className="panel flex flex-col overflow-hidden">
           <div className="panel-header">
-            <span>// ACTIVE AGENT</span>
+            <span>ACTIVE AGENT</span>
           </div>
           <div className="p-3 space-y-2 flex-1 overflow-y-auto">
             {currentAgent && (
@@ -5670,7 +5748,7 @@ function CasePage() {
               </div>
             )}
             <div className="border-t border-border pt-2 space-y-1">
-              <p className="text-[10px] text-muted-foreground mono uppercase px-2 font-semibold tracking-wider">// AGENTS PROGRESS</p>
+              <p className="text-[10px] text-muted-foreground mono uppercase px-2 font-semibold tracking-wider">AGENTS PROGRESS</p>
               {AGENTS.map((a, idx) => {
                 const isSelected = idx === agentStep;
                 const isCompleted = completedAgents.has(a.key);
@@ -5812,7 +5890,7 @@ function CasePage() {
           {showChat && (
             <div className="panel flex flex-col overflow-hidden border-l border-border/50 animate-slideLeft">
               <div className="panel-header flex items-center justify-between">
-                <span>// AGENT CONSOLE CHAT</span>
+                <span>AGENT CONSOLE CHAT</span>
                 <div className="flex items-center gap-2">
                   <Button
                     variant="ghost"
@@ -5864,8 +5942,8 @@ function CasePage() {
                         <Send className="w-6 h-6 text-primary" />
                       </div>
                     </div>
-                    <p className="mb-2">// {currentAgent?.shortName ?? "Agent"} is ready</p>
-                    <p className="text-xs">// Send incident data or description to begin analysis</p>
+                    <p className="mb-2">{currentAgent?.shortName ?? "Agent"} is ready</p>
+                    <p className="text-xs">Send incident data or description to begin analysis</p>
                     {agentStep > 0 && (
                       <p className="text-xs text-primary/60 mt-2">
                         // You are at step {currentAgent?.order} of 8

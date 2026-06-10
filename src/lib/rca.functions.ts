@@ -1030,6 +1030,29 @@ export const clearConversationMessages = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
+export const truncateMessagesAfter = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z.object({ conversationId: z.string(), afterMessageId: z.string() }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    const db = getDb();
+    const conv = db
+      .prepare("SELECT user_id FROM conversations WHERE id = ?")
+      .get(data.conversationId) as { user_id: string } | undefined;
+    if (!conv) throw new Error("Conversation not found");
+    if (conv.user_id !== userId) throw new Error("Forbidden");
+    const msg = db
+      .prepare("SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?")
+      .get(data.afterMessageId, data.conversationId) as { created_at: string } | undefined;
+    if (!msg) throw new Error("Message not found");
+    db.prepare(
+      "DELETE FROM messages WHERE conversation_id = ? AND created_at > ?",
+    ).run(data.conversationId, msg.created_at);
+    return { ok: true };
+  });
+
 export const saveFinalReport = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input) =>
