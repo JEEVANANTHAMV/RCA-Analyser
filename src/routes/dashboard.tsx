@@ -7,7 +7,7 @@ import { listMyCases, createRcaCase, deleteCase, preAnalyzeIncident } from "@/li
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash2, FileText, CheckCircle2, Clock, Paperclip, X, Eye, Sparkles, Loader2 } from "lucide-react";
+import { Plus, Trash2, FileText, CheckCircle2, Clock, Paperclip, X, Eye, Sparkles, Loader2, Globe, Users } from "lucide-react";
 import { toast } from "sonner";
 
 function parsePartialJson(jsonStr: string): any {
@@ -596,9 +596,19 @@ function DashboardPage() {
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {cases.map((c: any) => (
-            <div key={c.id} className="panel hover:border-primary/50 transition-colors group">
+            <div key={c.id} className={`panel hover:border-primary/50 transition-colors group ${c.is_collaborator ? "border-blue-500/20" : ""}`}>
               <div className="panel-header">
-                <span>{c.asset_id ?? "no asset"}</span>
+                <span className="flex items-center gap-1.5">
+                  {c.asset_id ?? "no asset"}
+                  {c.is_collaborator ? (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30 font-mono">Collaborator</span>
+                  ) : null}
+                  {c.is_public ? (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono flex items-center gap-0.5">
+                      <Globe className="w-2.5 h-2.5" /> Public
+                    </span>
+                  ) : null}
+                </span>
                 <span className="flex items-center gap-1">
                   {c.status === "completed" ? (
                     <CheckCircle2 className="w-3 h-3 text-[color:var(--signal-ok)]" />
@@ -614,16 +624,31 @@ function DashboardPage() {
                   {new Date(c.updated_at).toLocaleString()}
                 </p>
               </Link>
-              <div className="px-4 pb-3 flex justify-end">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    if (confirm("Delete this case?")) delMut.mutate(c.id);
-                  }}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </Button>
+              <div className="px-4 pb-3 flex justify-between items-center">
+                {c.is_public && c.public_slug ? (
+                  <a
+                    href={`/p/${c.public_slug}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] font-mono flex items-center gap-1 text-emerald-400 hover:text-emerald-300"
+                    onClick={e => e.stopPropagation()}
+                  >
+                    <Globe className="w-3 h-3" /> Public link
+                  </a>
+                ) : <span />}
+                <div className="flex items-center gap-1">
+                  {!c.is_collaborator && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        if (confirm("Delete this case?")) delMut.mutate(c.id);
+                      }}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                </div>
               </div>
             </div>
           ))}

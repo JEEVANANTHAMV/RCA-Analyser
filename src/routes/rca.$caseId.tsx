@@ -16,10 +16,18 @@ import {
   updateAssistantMessage,
   clearConversationMessages,
   truncateMessagesAfter,
+  updateUserMessage,
   runFullAutomation,
   downloadRcaReport,
   exportFullAnalysis,
   getCombinedAnalysis,
+  toggleCasePublic,
+  listCollaborators,
+  listUsersForCollaboration,
+  addCollaborator,
+  removeCollaborator,
+  getEditHistory,
+  revertEditVersion,
 } from "@/lib/rca.functions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -51,6 +59,15 @@ import {
   Clock,
   Zap,
   Edit,
+  Flag,
+  Globe,
+  Users,
+  History,
+  Copy,
+  Check,
+  UserPlus,
+  UserMinus,
+  RotateCcw,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -305,6 +322,18 @@ function CasePage() {
 
   // Report/CAPA States
   const [reportApproved, setReportApproved] = useState(false);
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  const [approvalForm, setApprovalForm] = useState({
+    zzNotification: "", zrNumber: "",
+    teamMembers: [
+      { name: "", dept: "", hzlBp: "", type: "Maintenance" },
+      { name: "", dept: "", hzlBp: "", type: "Engineering" },
+      { name: "", dept: "", hzlBp: "", type: "Operations" },
+    ],
+    sparePartCost: "", serviceCost: "", manpowerCost: "", productionLoss: "", totalBreakdownCost: "",
+    lastPMDate: "", cbmDate: "", cbmStatus: "",
+    lastFailureDate: "", lastFailureRootCause: "",
+  });
   const [capaActions, setCapaActions] = useState<any[]>([
     { id: "capa-1", desc: "Check safety lock constraints and verify manual controls are overridden.", owner: "Jane Doe (Maint)", date: "2026-05-25", status: "In Progress" },
     { id: "capa-2", desc: "Establish periodic inspection intervals for sensor suites and safety valves.", owner: "John Smith (Ops)", date: "2026-06-01", status: "Pending" }
@@ -323,6 +352,16 @@ function CasePage() {
   const [selectedCauseIds, setSelectedCauseIds] = useState<string[]>([]);
   const [customCauseText, setCustomCauseText] = useState<string>("");
   const [isDirty, setIsDirty] = useState(false);
+  const [editingStepIdx, setEditingStepIdx] = useState<number | null>(null);
+  const [editCauseId, setEditCauseId] = useState<string>("");
+  const [editCustomText, setEditCustomText] = useState<string>("");
+
+  // Sharing / Collaborators / History state
+  const [showSharePopover, setShowSharePopover] = useState(false);
+  const [showCollabDialog, setShowCollabDialog] = useState(false);
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [publicLinkCopied, setPublicLinkCopied] = useState(false);
+  const [togglingPublic, setTogglingPublic] = useState(false);
 
   // Automation state
   const [showAutoModal, setShowAutoModal] = useState(false);
@@ -449,6 +488,68 @@ function CasePage() {
     onError: (err: any) => {
       toast.error(err.message || "Failed to auto-save status");
     }
+  });
+
+  // ── Sharing ───────────────────────────────────────────────────────────────
+  const togglePublicFn = useServerFn(toggleCasePublic);
+  const togglePublicMut = useMutation({
+    mutationFn: () => togglePublicFn({ data: { caseId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to update public status"),
+  });
+
+  // ── Collaborators ─────────────────────────────────────────────────────────
+  const listCollabFn = useServerFn(listCollaborators);
+  const collabQ = useQuery({
+    queryKey: ["collabs", caseId],
+    queryFn: () => listCollabFn({ data: { caseId } }),
+    enabled: showCollabDialog,
+  });
+  const listUsersFn = useServerFn(listUsersForCollaboration);
+  const usersForCollabQ = useQuery({
+    queryKey: ["users-for-collab", caseId],
+    queryFn: () => listUsersFn({ data: { caseId } }),
+    enabled: showCollabDialog && (caseQ.data?.isOwner ?? false),
+  });
+  const addCollabFn = useServerFn(addCollaborator);
+  const addCollabMut = useMutation({
+    mutationFn: (targetUserId: string) => addCollabFn({ data: { caseId, targetUserId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["collabs", caseId] });
+      qc.invalidateQueries({ queryKey: ["users-for-collab", caseId] });
+      toast.success("Collaborator added");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to add collaborator"),
+  });
+  const removeCollabFn = useServerFn(removeCollaborator);
+  const removeCollabMut = useMutation({
+    mutationFn: (collaboratorUserId: string) => removeCollabFn({ data: { caseId, collaboratorUserId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["collabs", caseId] });
+      qc.invalidateQueries({ queryKey: ["users-for-collab", caseId] });
+      toast.success("Collaborator removed");
+    },
+    onError: (e: any) => toast.error(e.message || "Failed to remove collaborator"),
+  });
+
+  // ── Edit History ──────────────────────────────────────────────────────────
+  const getHistoryFn = useServerFn(getEditHistory);
+  const historyQ = useQuery({
+    queryKey: ["edit-history", caseId],
+    queryFn: () => getHistoryFn({ data: { caseId } }),
+    enabled: showHistoryPanel,
+  });
+  const revertFn = useServerFn(revertEditVersion);
+  const revertMut = useMutation({
+    mutationFn: (historyId: string) => revertFn({ data: { caseId, historyId } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
+      qc.invalidateQueries({ queryKey: ["edit-history", caseId] });
+      toast.success("Reverted to earlier version");
+    },
+    onError: (e: any) => toast.error(e.message || "Revert failed"),
   });
 
   const ensure = useServerFn(ensureConversation);
@@ -579,6 +680,7 @@ function CasePage() {
 
   const clearChatFn = useServerFn(clearConversationMessages);
   const truncateMsgsFn = useServerFn(truncateMessagesAfter);
+  const updateUserMsgFn = useServerFn(updateUserMessage);
   const clearChatMut = useMutation({
     mutationFn: async () => {
       const cid = convIdRef.current;
@@ -1284,6 +1386,13 @@ function CasePage() {
     }
   }, [parsedData, messages, currentAgent?.key, convId]);
 
+  // Sync reportApproved from DB-persisted parsedData when the report agent loads
+  useEffect(() => {
+    if (currentAgent?.key === "report" && parsedData?.approved !== undefined) {
+      setReportApproved(!!parsedData.approved);
+    }
+  }, [currentAgent?.key, parsedData?.approved]);
+
   const renderMessageContent = (content: string, role: string, isCompletedRecord = false) => {
     if (role === "assistant") {
       const parsed = parseMaybeJson(content);
@@ -1748,6 +1857,7 @@ function CasePage() {
                     operatorInstruction: parsed.operatorInstruction || "",
                     selectedAnswer: selected,
                     messageId: m.id,
+                    userMessageId: (nextMsg && nextMsg.role === "user") ? nextMsg.id : "",
                   });
                 }
               } catch { }
@@ -1913,7 +2023,7 @@ function CasePage() {
 
                         <h4 className="text-sm font-semibold text-foreground mb-3">{step.question}</h4>
 
-                        {step.selectedAnswer ? (
+                        {step.selectedAnswer && editingStepIdx !== idx ? (
                           <div className="flex items-start gap-2 bg-emerald-500/5 border border-emerald-500/20 rounded-md p-3">
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                             <div className="flex-1 space-y-2">
@@ -1921,8 +2031,30 @@ function CasePage() {
                                 <span className="text-emerald-400 font-semibold font-mono uppercase tracking-wider block text-[10px] mb-0.5">DEDUCTION / EXPLANATION</span>
                                 <span className="text-sm text-muted-foreground font-medium">{displayAns}</span>
                               </div>
-                              <div className="flex gap-2 pt-1 border-t border-emerald-500/10">
+                              <div className="flex gap-2 pt-1 border-t border-emerald-500/10 flex-wrap">
                                 <button
+                                  title="Change just this answer without clearing later steps"
+                                  onClick={() => {
+                                    const raw = step.selectedAnswer;
+                                    // Pre-populate edit selection from existing answer
+                                    const m = raw.match(/^I select (cause-[^:]+):/);
+                                    if (m) {
+                                      setEditCauseId(m[1]);
+                                      setEditCustomText("");
+                                    } else {
+                                      const text = raw.replace(/^I select (the )?/, "").replace(/\.$/, "").trim();
+                                      const found = step.possibleCauses.find((c: any) => c.description === text);
+                                      setEditCauseId(found ? found.id : "custom");
+                                      setEditCustomText(found ? "" : text);
+                                    }
+                                    setEditingStepIdx(idx);
+                                  }}
+                                  className="text-xs px-3 py-1.5 rounded-md bg-blue-500/15 text-blue-400 border border-blue-500/30 hover:bg-blue-500/25 transition-all font-mono flex items-center gap-1"
+                                >
+                                  <Edit className="w-3 h-3" /> Edit Answer
+                                </button>
+                                <button
+                                  title="Clear this answer and all subsequent steps"
                                   onClick={async () => {
                                     if (!convId || !step.messageId) return;
                                     try {
@@ -1932,16 +2064,100 @@ function CasePage() {
                                       setSelectedCauseId("");
                                       setCustomCauseText("");
                                       qc.invalidateQueries({ queryKey: ["msgs", convId] });
-                                      toast.info("Answer reset — you can re-answer");
+                                      toast.info("Answer reset — you can re-answer from here");
                                     } catch {
                                       toast.error("Failed to reset answer");
                                     }
                                   }}
                                   className="text-xs px-3 py-1.5 rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 transition-all font-mono"
                                 >
-                                  ↻ Re-answer
+                                  ↻ Re-answer from here
                                 </button>
                               </div>
+                            </div>
+                          </div>
+                        ) : step.selectedAnswer && editingStepIdx === idx ? (
+                          <div className="space-y-3 border border-blue-500/30 rounded-md p-3 bg-blue-500/5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-wider">EDIT THIS ANSWER (keeps later steps intact)</span>
+                              <button onClick={() => setEditingStepIdx(null)} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕ Cancel</button>
+                            </div>
+                            <div className="grid gap-2">
+                              {step.possibleCauses.map((cause: any) => {
+                                const isSelected = editCauseId === cause.id;
+                                return (
+                                  <button key={cause.id} type="button"
+                                    onClick={() => { setEditCauseId(cause.id); setEditCustomText(""); }}
+                                    className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
+                                  >
+                                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-blue-500" : "border-muted-foreground/30"}`}>
+                                      {isSelected && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                    </div>
+                                    <div className="flex-1 space-y-1">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">{cause.category}</span>
+                                        {renderLikelihoodBadge(cause.likelihood)}
+                                      </div>
+                                      <p className="text-xs font-semibold text-foreground">{cause.description}</p>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                              <button type="button"
+                                onClick={() => setEditCauseId("custom")}
+                                className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${editCauseId === "custom" ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
+                              >
+                                <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${editCauseId === "custom" ? "border-blue-500" : "border-muted-foreground/30"}`}>
+                                  {editCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                </div>
+                                <div className="flex-1 space-y-1">
+                                  <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">Custom</span>
+                                  <p className="text-xs font-semibold text-foreground">Write a custom explanation/cause for this step</p>
+                                </div>
+                              </button>
+                            </div>
+                            {editCauseId === "custom" && (
+                              <div className="space-y-2">
+                                <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">WRITE CUSTOM EXPLANATION</label>
+                                <textarea
+                                  value={editCustomText}
+                                  onChange={(e) => setEditCustomText(e.target.value)}
+                                  placeholder="Type your custom operational finding..."
+                                  rows={2}
+                                  className="w-full text-xs p-2 bg-background border border-border rounded text-foreground resize-none font-mono focus:border-blue-500/50 focus:outline-none"
+                                />
+                              </div>
+                            )}
+                            <div className="flex gap-2 pt-1">
+                              <button
+                                disabled={!editCauseId || (editCauseId === "custom" && !editCustomText.trim())}
+                                onClick={async () => {
+                                  if (!convId || !step.userMessageId) return;
+                                  let answerText = "";
+                                  if (editCauseId === "custom") {
+                                    if (!editCustomText.trim()) { toast.error("Please enter a custom explanation."); return; }
+                                    answerText = `I select the ${editCustomText.trim()}.`;
+                                  } else {
+                                    const cause = step.possibleCauses.find((c: any) => c.id === editCauseId);
+                                    if (cause) answerText = `I select ${cause.id}: ${cause.description}`;
+                                  }
+                                  if (!answerText) { toast.error("Please select a cause."); return; }
+                                  try {
+                                    await updateUserMsgFn({ data: { conversationId: convId, messageId: step.userMessageId, content: answerText } });
+                                    setEditingStepIdx(null);
+                                    qc.invalidateQueries({ queryKey: ["msgs", convId] });
+                                    toast.success("Answer updated!");
+                                  } catch {
+                                    toast.error("Failed to update answer");
+                                  }
+                                }}
+                                className="text-xs px-4 py-1.5 rounded-md bg-blue-500 text-white hover:bg-blue-600 transition-all font-mono font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Confirm Edit
+                              </button>
+                              <button onClick={() => setEditingStepIdx(null)} className="text-xs px-3 py-1.5 rounded-md border border-border/60 text-muted-foreground hover:text-foreground transition-all font-mono">
+                                Cancel
+                              </button>
                             </div>
                           </div>
                         ) : step.isStreaming && step.possibleCauses.length === 0 ? (
@@ -2122,7 +2338,7 @@ function CasePage() {
             {/* Save Findings & Iterative Q&A */}
             {interactiveSteps.length > 0 && (
               <div className="space-y-4">
-                <div className="flex gap-3 items-center">
+                <div className="flex gap-3 items-center flex-wrap">
                   <Button
                     variant="outline"
                     size="sm"
@@ -2132,7 +2348,7 @@ function CasePage() {
                         answer: s.selectedAnswer || "",
                         isValidRootCause: s.selectedAnswer !== "",
                       }));
-                      const updatedPayload = { ...parsedData, fiveWhys: findings };
+                      const updatedPayload = { ...(parsedData || {}), fiveWhys: findings };
                       updateAgentMsgMut.mutate(updatedPayload);
                       toast.success("5-Why findings saved!");
                     }}
@@ -2142,6 +2358,33 @@ function CasePage() {
                     {updateAgentMsgMut.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <FileCheck2 className="w-4 h-4 mr-2" />}
                     Save Findings
                   </Button>
+                  {interactiveSteps.filter(s => s.selectedAnswer).length >= 2 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const answeredSteps = interactiveSteps.filter(s => s.selectedAnswer);
+                        const findings = answeredSteps.map(s => ({
+                          question: s.question,
+                          answer: s.selectedAnswer || "",
+                          isValidRootCause: true,
+                        }));
+                        const updatedPayload = { ...(parsedData || {}), fiveWhys: findings, rootCauseConcluded: true };
+                        updateAgentMsgMut.mutate(updatedPayload, {
+                          onSuccess: () => {
+                            toast.success("Root cause concluded! Proceeding to Fishbone…");
+                            const fishboneIdx = AGENTS.findIndex(a => a.key === "fishbone");
+                            if (fishboneIdx !== -1) setTimeout(() => goToAgent(fishboneIdx), 800);
+                          }
+                        });
+                      }}
+                      disabled={updateAgentMsgMut.isPending}
+                      className="text-sm font-mono border-emerald-500/40 text-emerald-500 hover:bg-emerald-500/10"
+                    >
+                      <Flag className="w-4 h-4 mr-2" />
+                      Finalize Root Cause Here
+                    </Button>
+                  )}
                 </div>
                 <div className="border border-border/50 rounded-xl overflow-hidden">
                   <div className="bg-secondary/25 border-b border-border/40 p-3 flex items-center justify-between">
@@ -4313,40 +4556,41 @@ function CasePage() {
               </div>
             </div>
 
-            {/* Gantt-style Horizontal Lanes representation */}
-            <div className="bg-secondary/20 border border-border/50 rounded-xl p-6 overflow-x-auto relative">
-              <span className="text-xs text-muted-foreground mono block mb-4">// HORIZONTAL GANTT SEQUENCE VIEW</span>
-
-              <div className="min-w-[700px] flex items-center gap-2 py-4">
+            {/* Horizontal phase flow bar */}
+            <div className="overflow-x-auto">
+              <div className="min-w-[680px] flex items-stretch gap-0 rounded-xl overflow-hidden border border-border/60 shadow-sm">
                 {phases.map((phase: any, idx: number) => {
-                  let colorClass = "from-emerald-600/30 to-emerald-500/20 border-emerald-500/40 text-emerald-400";
-                  if (phase.phase.toLowerCase().includes("trigger") || phase.phase.toLowerCase().includes("onset") || phase.phase.toLowerCase().includes("failure")) {
-                    colorClass = "from-rose-600/30 to-rose-500/20 border-rose-500/40 text-rose-400";
-                  } else if (phase.phase.toLowerCase().includes("recovery") || phase.phase.toLowerCase().includes("response")) {
-                    colorClass = "from-blue-600/30 to-blue-500/20 border-blue-500/40 text-blue-400";
-                  } else if (phase.phase.toLowerCase().includes("pre")) {
-                    colorClass = "from-amber-600/30 to-amber-500/20 border-amber-500/40 text-amber-400";
+                  let barBg = "bg-emerald-500";
+                  let cardBg = "bg-card border-l-4 border-emerald-500";
+                  let labelColor = "text-emerald-600 dark:text-emerald-400";
+                  const pl = phase.phase.toLowerCase();
+                  if (pl.includes("trigger") || pl.includes("onset") || pl.includes("failure") || pl.includes("fault")) {
+                    barBg = "bg-rose-500"; cardBg = "bg-card border-l-4 border-rose-500"; labelColor = "text-rose-600 dark:text-rose-400";
+                  } else if (pl.includes("recovery") || pl.includes("response") || pl.includes("post")) {
+                    barBg = "bg-blue-500"; cardBg = "bg-card border-l-4 border-blue-500"; labelColor = "text-blue-600 dark:text-blue-400";
+                  } else if (pl.includes("pre") || pl.includes("normal")) {
+                    barBg = "bg-amber-500"; cardBg = "bg-card border-l-4 border-amber-500"; labelColor = "text-amber-600 dark:text-amber-400";
                   }
 
                   return (
-                    <div key={idx} className="flex-1 flex items-center relative">
-                      <div className={`w-full p-4 rounded-xl border bg-gradient-to-br ${colorClass} hover:scale-[1.02] transition-transform`}>
-                        <div className="flex justify-between items-start gap-1 mb-1">
-                          <span className="text-xs font-bold uppercase tracking-wider">{phase.phase}</span>
-                          <button onClick={() => deletePhase(idx)} className="opacity-60 hover:opacity-100 hover:text-red-400 transition-opacity">
-                            <Trash2 className="w-3.5 h-3.5" />
+                    <div key={idx} className="flex-1 flex flex-col relative group">
+                      <div className={`h-1.5 w-full ${barBg}`} />
+                      <div className={`flex-1 p-4 ${cardBg} hover:bg-secondary/30 transition-colors`}>
+                        <div className="flex justify-between items-start gap-1 mb-2">
+                          <span className={`text-xs font-bold uppercase tracking-wide ${labelColor}`}>{phase.phase}</span>
+                          <button onClick={() => deletePhase(idx)} className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 transition-all">
+                            <Trash2 className="w-3 h-3" />
                           </button>
                         </div>
-                        <div className="flex gap-2 text-[10px] mono opacity-80 mb-2">
-                          <span>Start: {phase.start || phase.time}</span>
-                          <span>|</span>
-                          <span>Dur: {phase.duration}</span>
+                        <div className="text-[10px] text-muted-foreground space-y-0.5">
+                          {(phase.start || phase.time) && <div><span className="font-semibold">Start:</span> {phase.start || phase.time}</div>}
+                          {phase.duration && <div><span className="font-semibold">Duration:</span> {phase.duration}</div>}
                         </div>
-                        <p className="text-[11px] font-medium leading-relaxed truncate">{phase.description}</p>
+                        {phase.description && <p className="text-[11px] text-foreground/80 mt-2 leading-relaxed line-clamp-2">{phase.description}</p>}
                       </div>
                       {idx < phases.length - 1 && (
-                        <div className="px-2 shrink-0">
-                          <ArrowRight className="w-4 h-4 text-muted-foreground/60" />
+                        <div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-1/2 z-10 w-5 h-5 rounded-full bg-border flex items-center justify-center">
+                          <ArrowRight className="w-3 h-3 text-muted-foreground" />
                         </div>
                       )}
                     </div>
@@ -4355,88 +4599,97 @@ function CasePage() {
               </div>
             </div>
 
-            {/* List Chronological Timeline detail view */}
-            <div className="relative border-l border-border/60 ml-4 pl-6 space-y-6 py-2">
+            {/* Detailed vertical timeline */}
+            <div className="space-y-3">
               {phases.map((phase: any, idx: number) => {
-                let dotColor = "bg-primary";
-                if (phase.phase.toLowerCase().includes("pre")) dotColor = "bg-amber-500";
-                if (phase.phase.toLowerCase().includes("trigger") || phase.phase.toLowerCase().includes("onset") || phase.phase.toLowerCase().includes("failure")) dotColor = "bg-rose-500";
-                if (phase.phase.toLowerCase().includes("recovery") || phase.phase.toLowerCase().includes("response")) dotColor = "bg-blue-500";
+                let accentColor = "border-l-emerald-500 bg-emerald-500";
+                let headerBg = "bg-emerald-50 dark:bg-emerald-950/30";
+                let headerText = "text-emerald-700 dark:text-emerald-300";
+                const pl = phase.phase.toLowerCase();
+                if (pl.includes("trigger") || pl.includes("onset") || pl.includes("failure") || pl.includes("fault")) {
+                  accentColor = "border-l-rose-500 bg-rose-500"; headerBg = "bg-rose-50 dark:bg-rose-950/30"; headerText = "text-rose-700 dark:text-rose-300";
+                } else if (pl.includes("recovery") || pl.includes("response") || pl.includes("post")) {
+                  accentColor = "border-l-blue-500 bg-blue-500"; headerBg = "bg-blue-50 dark:bg-blue-950/30"; headerText = "text-blue-700 dark:text-blue-300";
+                } else if (pl.includes("pre") || pl.includes("normal")) {
+                  accentColor = "border-l-amber-500 bg-amber-500"; headerBg = "bg-amber-50 dark:bg-amber-950/30"; headerText = "text-amber-700 dark:text-amber-300";
+                }
 
                 return (
-                  <div key={idx} className="relative hover:bg-secondary/20 transition-all rounded-lg p-4 border border-transparent hover:border-border/30 bg-background/50">
-                    <span className={`absolute -left-[31px] top-6 w-3.5 h-3.5 rounded-full border-2 border-background ${dotColor}`} />
-                    <div className="flex justify-between items-start gap-2 mb-2">
-                      <div className="flex-1">
+                  <div key={idx} className={`rounded-xl border border-border/60 border-l-4 ${accentColor.split(" ")[0]} bg-card shadow-sm overflow-hidden`}>
+                    {/* Phase header */}
+                    <div className={`${headerBg} px-5 py-3 flex items-center justify-between gap-3`}>
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${accentColor.split(" ")[1]}`} />
                         <input
                           type="text"
                           value={phase.phase}
                           onChange={(e) => editPhase(idx, "phase", e.target.value)}
-                          className="w-full bg-transparent border-0 p-0 text-sm font-bold uppercase tracking-wider text-primary focus:ring-0 focus:outline-none"
+                          className={`bg-transparent border-0 p-0 text-sm font-bold uppercase tracking-wide ${headerText} focus:ring-0 focus:outline-none w-full`}
                         />
                       </div>
-                      <button onClick={() => deletePhase(idx)} className="text-muted-foreground hover:text-red-500 transition-colors shrink-0">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground shrink-0">
+                        {(phase.start || phase.time) && <span><span className="font-semibold">Start:</span> {phase.start || phase.time}</span>}
+                        {phase.duration && <span>· {phase.duration}</span>}
+                        <button onClick={() => deletePhase(idx)} className="text-muted-foreground hover:text-red-500 transition-colors ml-1">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-3 mb-2">
+                    {/* Phase body */}
+                    <div className="px-5 py-4 space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] text-muted-foreground font-semibold block mb-1 uppercase tracking-wider">Start Time</label>
+                          <input type="text" value={phase.start || phase.time || ""} onChange={(e) => editPhase(idx, "start", e.target.value)}
+                            className="w-full text-xs p-2 bg-background border border-border/60 rounded-lg text-foreground focus:border-primary/50 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-muted-foreground font-semibold block mb-1 uppercase tracking-wider">Duration</label>
+                          <input type="text" value={phase.duration || ""} onChange={(e) => editPhase(idx, "duration", e.target.value)}
+                            className="w-full text-xs p-2 bg-background border border-border/60 rounded-lg text-foreground focus:border-primary/50 focus:outline-none" />
+                        </div>
+                      </div>
                       <div>
-                        <label className="text-[10px] text-muted-foreground font-mono block mb-0.5">START TIME</label>
-                        <input
-                          type="text"
-                          value={phase.start || phase.time || ""}
-                          onChange={(e) => editPhase(idx, "start", e.target.value)}
-                          className="w-full text-xs p-1.5 bg-background border border-border rounded text-foreground font-mono"
-                        />
+                        <label className="text-[10px] text-muted-foreground font-semibold block mb-1 uppercase tracking-wider">Description</label>
+                        <textarea value={phase.description || ""} onChange={(e) => editPhase(idx, "description", e.target.value)} rows={2}
+                          className="w-full text-xs p-2 bg-background border border-border/60 rounded-lg text-foreground resize-none focus:border-primary/50 focus:outline-none" />
                       </div>
-                      <div>
-                        <label className="text-[10px] text-muted-foreground font-mono block mb-0.5">DURATION</label>
-                        <input
-                          type="text"
-                          value={phase.duration || ""}
-                          onChange={(e) => editPhase(idx, "duration", e.target.value)}
-                          className="w-full text-xs p-1.5 bg-background border border-border rounded text-foreground font-mono"
-                        />
-                      </div>
+                      {Array.isArray(phase.events) && phase.events.length > 0 && (
+                        <div className="space-y-1.5">
+                          <span className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider block">Events</span>
+                          <div className="space-y-1.5 pl-3 border-l-2 border-border/40">
+                            {phase.events.map((e: any, i: number) => {
+                              if (typeof e === "string") {
+                                return (
+                                  <div key={i} className="text-xs flex items-start gap-2 text-foreground/80">
+                                    <span className="text-muted-foreground shrink-0 mt-0.5">·</span>
+                                    <span>{e}</span>
+                                  </div>
+                                );
+                              }
+                              const sigBadge = e.significance === "critical"
+                                ? "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
+                                : e.significance === "high"
+                                ? "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"
+                                : "bg-secondary text-muted-foreground";
+                              return (
+                                <div key={i} className="text-xs bg-secondary/40 border border-border/30 rounded-lg p-2.5 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    {e.timestamp && <span className="text-primary font-semibold text-[10px]">{e.timestamp}</span>}
+                                    {e.significance && <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded ${sigBadge}`}>{e.significance}</span>}
+                                    {e.category && <span className="text-[9px] text-muted-foreground uppercase bg-secondary px-1.5 py-0.5 rounded">{e.category}</span>}
+                                    {e.isTripEvent && <span className="text-[9px] bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300 px-1.5 py-0.5 rounded uppercase font-bold">TRIP</span>}
+                                    {e.isFirstDeviation && <span className="text-[9px] bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300 px-1.5 py-0.5 rounded uppercase font-bold">FIRST DEV</span>}
+                                  </div>
+                                  <p className="text-foreground font-medium">{e.event || e.desc}</p>
+                                  {e.notes && <p className="text-muted-foreground text-[10px] italic">{e.notes}</p>}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div>
-                      <label className="text-[10px] text-muted-foreground font-mono block mb-0.5">DESCRIPTION</label>
-                      <textarea
-                        value={phase.description || ""}
-                        onChange={(e) => editPhase(idx, "description", e.target.value)}
-                        rows={2}
-                        className="w-full text-xs p-1.5 bg-background border border-border rounded text-foreground resize-none"
-                      />
-                    </div>
-                    {Array.isArray(phase.events) && phase.events.length > 0 && (
-                      <div className="mt-3 space-y-1.5 pl-3 border-l border-primary/20">
-                        <span className="text-[10px] text-muted-foreground font-mono block mb-1">SUB-EVENTS</span>
-                        {phase.events.map((e: any, i: number) => {
-                          if (typeof e === "string") {
-                            return (
-                              <div key={i} className="text-xs flex items-start gap-1">
-                                <span className="text-primary font-bold shrink-0">•</span>
-                                <span className="text-muted-foreground">{e}</span>
-                              </div>
-                            );
-                          }
-                          const sigColor = e.significance === "critical" ? "text-rose-400" : e.significance === "high" ? "text-amber-400" : "text-muted-foreground";
-                          return (
-                            <div key={i} className="text-xs border border-border/30 rounded p-2 bg-secondary/20 space-y-0.5">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                {e.timestamp && <span className="font-mono text-primary text-[10px]">{e.timestamp}</span>}
-                                {e.significance && <span className={`text-[9px] uppercase font-bold ${sigColor}`}>{e.significance}</span>}
-                                {e.category && <span className="text-[9px] text-muted-foreground/60 uppercase">{e.category}</span>}
-                                {e.isTripEvent && <span className="text-[9px] bg-rose-500/20 text-rose-400 px-1 rounded uppercase font-bold">TRIP</span>}
-                                {e.isFirstDeviation && <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1 rounded uppercase font-bold">FIRST DEV</span>}
-                              </div>
-                              <p className="text-foreground">{e.event || e.desc}</p>
-                              {e.notes && <p className="text-muted-foreground/70 text-[10px] italic">{e.notes}</p>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
                   </div>
                 );
               })}
@@ -5036,10 +5289,13 @@ function CasePage() {
             {/* ══ Top bar ══ */}
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-base mono uppercase tracking-wide">Full RCA Analysis — All 8 Steps</h3>
-              <div className="flex gap-2">
-                <Button size="sm" onClick={saveReport} disabled={updateAgentMsgMut.isPending} variant="outline" className="h-7 text-xs">
-                  {updateAgentMsgMut.isPending ? "Saving..." : "Save Edits"}
-                </Button>
+              <div className="flex gap-2 items-center">
+                {reportApproved && <span className="text-[10px] font-mono text-emerald-500 flex items-center gap-1"><Lock className="w-3 h-3" /> Locked</span>}
+                {!reportApproved && (
+                  <Button size="sm" onClick={saveReport} disabled={updateAgentMsgMut.isPending} variant="outline" className="h-7 text-xs">
+                    {updateAgentMsgMut.isPending ? "Saving..." : "Save Edits"}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -5077,18 +5333,91 @@ function CasePage() {
             </div>
 
             {/* ══ Approval State ══ */}
-            <div className="bg-secondary/25 border border-border/50 rounded-xl p-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div className={`border rounded-xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 ${reportApproved ? "bg-emerald-500/8 border-emerald-500/30" : "bg-secondary/25 border-border/50"}`}>
               <div className="flex items-center gap-3">
                 <Badge className={reportApproved ? "bg-emerald-500/25 text-emerald-400 border-emerald-500/40" : "bg-amber-500/20 text-amber-400 border-amber-500/40"}>
-                  {reportApproved ? "APPROVED & SIGNED" : "DRAFT STATE"}
+                  {reportApproved ? "✓ APPROVED & SIGNED — LOCKED" : "DRAFT STATE"}
                 </Badge>
-                <p className="text-[10px] font-mono text-muted-foreground">// WORKFLOW APPROVAL STATE</p>
+                {reportApproved && <p className="text-[10px] font-mono text-emerald-500/70">All report fields are now read-only. Revoke to make changes.</p>}
+                {!reportApproved && <p className="text-[10px] font-mono text-muted-foreground">WORKFLOW APPROVAL STATE</p>}
               </div>
-              <Button size="sm" variant={reportApproved ? "outline" : "default"}
-                onClick={() => { const n = !reportApproved; setReportApproved(n); toast.success(n ? "Report Approved!" : "Returned to draft."); }}>
-                {reportApproved ? "Revoke Approval" : "Sign & Approve Report"}
-              </Button>
+              <div className="flex gap-2">
+                {reportApproved ? (
+                  <Button size="sm" variant="outline"
+                    disabled={updateAgentMsgMut.isPending}
+                    onClick={() => {
+                      updateAgentMsgMut.mutate({ ...(parsedData || {}), approved: false }, {
+                        onSuccess: () => { setReportApproved(false); toast.info("Report returned to draft — editing enabled."); },
+                        onError: () => toast.error("Failed to revoke approval"),
+                      });
+                    }}>
+                    {updateAgentMsgMut.isPending ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Unlock className="w-3.5 h-3.5 mr-1.5" />}
+                    Revoke Approval
+                  </Button>
+                ) : (
+                  <Button size="sm"
+                    onClick={() => {
+                      // Pre-populate form from existing report data
+                      const af = { ...approvalForm };
+                      if (reportPayload?.header?.z2NotificationNumber) af.zzNotification = reportPayload.header.z2NotificationNumber;
+                      if (reportPayload?.header?.zrNumber) af.zrNumber = reportPayload.header.zrNumber;
+                      // Pre-fill team members: prefer collaborators, fall back to report data
+                      const collabs = caseQ.data?.collaborators ?? [];
+                      if (collabs.length > 0) {
+                        af.teamMembers = collabs.map((c) => ({
+                          name: c.full_name || c.email,
+                          dept: "",
+                          hzlBp: "",
+                          type: "Operations",
+                        }));
+                        while (af.teamMembers.length < 3) af.teamMembers.push({ name: "", dept: "", hzlBp: "", type: "" });
+                      } else if (Array.isArray(reportPayload?.teamMembers) && reportPayload.teamMembers.length) {
+                        af.teamMembers = reportPayload.teamMembers.map((m: any) => ({ name: m.name || "", dept: m.department || "", hzlBp: m.type || "", type: m.type || "" }));
+                        while (af.teamMembers.length < 3) af.teamMembers.push({ name: "", dept: "", hzlBp: "", type: "" });
+                      }
+                      const cof = reportPayload?.costOfFailure || {};
+                      af.sparePartCost = cof.sparePartCost != null ? String(cof.sparePartCost) : "";
+                      af.serviceCost = cof.serviceCost != null ? String(cof.serviceCost) : "";
+                      af.manpowerCost = cof.manpowerCost != null ? String(cof.manpowerCost) : "";
+                      af.productionLoss = cof.productionLoss != null ? String(cof.productionLoss) : "";
+                      af.totalBreakdownCost = cof.totalBreakdownCost != null ? String(cof.totalBreakdownCost) : "";
+                      const mh = reportPayload?.maintenanceHistory || {};
+                      af.lastPMDate = mh.lastPMDate && mh.lastPMDate !== "—" ? mh.lastPMDate : "";
+                      af.cbmDate = mh.cbmDate && mh.cbmDate !== "—" ? mh.cbmDate : "";
+                      af.cbmStatus = mh.cbmStatus && mh.cbmStatus !== "—" ? mh.cbmStatus : "";
+                      const lf = reportPayload?.lastFailure || {};
+                      af.lastFailureDate = lf.date && lf.date !== "—" ? lf.date : "";
+                      af.lastFailureRootCause = lf.rootCause && lf.rootCause !== "—" ? lf.rootCause : "";
+                      setApprovalForm(af);
+                      setShowApprovalModal(true);
+                    }}>
+                    <Lock className="w-3.5 h-3.5 mr-1.5" />
+                    Sign & Approve Report
+                  </Button>
+                )}
+              </div>
             </div>
+
+            {/* ══ Pending Questions from Agent ══ */}
+            {Array.isArray(reportPayload?.pendingQuestions) && reportPayload.pendingQuestions.length > 0 && !reportApproved && (
+              <div className="bg-amber-500/8 border border-amber-500/30 rounded-xl p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                  <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">Report has {reportPayload.pendingQuestions.length} missing field{reportPayload.pendingQuestions.length > 1 ? "s" : ""} — click "Sign & Approve" to fill them before locking</p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {reportPayload.pendingQuestions.map((q: any, i: number) => (
+                    <div key={i} className="flex gap-2 p-2 bg-amber-500/5 border border-amber-500/20 rounded-lg text-xs">
+                      <span className="text-amber-500 font-bold shrink-0">?</span>
+                      <div>
+                        <p className="font-semibold text-foreground">{q.label}</p>
+                        {q.hint && <p className="text-muted-foreground text-[10px] mt-0.5">{q.hint}</p>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* ══════════════════════════════════════════════════════════ */}
             {/* Loading skeleton while fetching combined data             */}
@@ -5332,17 +5661,21 @@ function CasePage() {
             <div className="bg-red-950/20 border border-red-500/25 rounded-xl p-5 space-y-4">
               <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-400" />
 
-              {/* Editable problem + root cause */}
+              {/* Problem + root cause (locked when approved) */}
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="text-[10px] text-muted-foreground font-mono block mb-1">PROBLEM STATEMENT</label>
-                  <input type="text" value={editProblemStatement} onChange={e => setEditProblemStatement(e.target.value)}
-                    className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground" />
+                  {reportApproved
+                    ? <p className="text-sm font-semibold p-2 bg-secondary/20 border border-border/40 rounded text-foreground">{editProblemStatement || "—"}</p>
+                    : <input type="text" value={editProblemStatement} onChange={e => setEditProblemStatement(e.target.value)}
+                        className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground" />}
                 </div>
                 <div>
                   <label className="text-[10px] text-muted-foreground font-mono block mb-1">CONFIRMED ROOT CAUSE</label>
-                  <Textarea value={editRootCauseText} onChange={e => setEditRootCauseText(e.target.value)} autoResize
-                    className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground" />
+                  {reportApproved
+                    ? <p className="text-xs font-mono p-2 bg-secondary/20 border border-border/40 rounded text-foreground whitespace-pre-wrap">{editRootCauseText || "—"}</p>
+                    : <Textarea value={editRootCauseText} onChange={e => setEditRootCauseText(e.target.value)} autoResize
+                        className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground" />}
                 </div>
               </div>
 
@@ -5391,40 +5724,40 @@ function CasePage() {
                 <div className="flex justify-between items-center">
                   <span className="text-[10px] font-mono text-primary font-bold">CAPA ACTION ITEM TRACKER</span>
                 </div>
-                {capaActions.map(act => (
+                {capaActions.map((act, actIdx) => (
                   <div key={act.id} className="p-3 border border-border/50 rounded-lg bg-background/50 text-xs space-y-2">
                     <div className="flex justify-between items-center text-[10px] font-mono text-muted-foreground uppercase">
-                      <span>Action Item Description</span>
-                      <button onClick={() => deleteCapa(act.id)} className="text-muted-foreground hover:text-red-400 p-0.5 rounded hover:bg-red-500/10 transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <span>Action #{actIdx + 1}</span>
+                      {!reportApproved && <button onClick={() => deleteCapa(act.id)} className="text-muted-foreground hover:text-red-400 p-0.5 rounded hover:bg-red-500/10 transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>}
                     </div>
-                    <Textarea
-                      value={act.desc}
-                      onChange={e => updateCapa(act.id, "desc", e.target.value)}
-                      autoResize
-                      placeholder="Describe the action item in detail..."
-                      className="w-full text-xs font-semibold text-foreground px-3 py-2 min-h-[60px]"
-                    />
+                    {reportApproved
+                      ? <p className="text-xs font-semibold text-foreground px-1 py-1 whitespace-pre-wrap">{act.desc}</p>
+                      : <Textarea value={act.desc} onChange={e => updateCapa(act.id, "desc", e.target.value)} autoResize placeholder="Describe the action item in detail..." className="w-full text-xs font-semibold text-foreground px-3 py-2 min-h-[60px]" />
+                    }
                     <div className="grid grid-cols-5 gap-2 pt-1.5 border-t border-border/20 text-[9px] mono">
-                      {[["Type", "type", "CA|PA", act.type || "CA"], ["Owner", "owner", "text", act.owner], ["Dept", "dept", "text", act.dept || ""], ["Due", "date", "text", act.date], ["Status", "status", "Pending|In Progress|Completed", act.status]].map(([lbl, field, opts, val]) => (
-                        <div key={field as string}>
-                          <span className="text-muted-foreground">{lbl as string}:</span>
-                          {(opts as string).includes("|") ? (
-                            <select value={val as string} onChange={e => updateCapa(act.id, field as string, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
-                              {(opts as string).split("|").map(o => <option key={o} value={o}>{o}</option>)}
-                            </select>
-                          ) : (
-                            <input type="text" value={val as string} onChange={e => updateCapa(act.id, field as string, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground" />
-                          )}
+                      {([["Type", "type", act.type || "CA"], ["Owner", "owner", act.owner], ["Dept", "dept", act.dept || ""], ["Due", "date", act.date], ["Status", "status", act.status]] as [string, string, string][]).map(([lbl, field, val]) => (
+                        <div key={field}>
+                          <span className="text-muted-foreground">{lbl}:</span>
+                          {reportApproved
+                            ? <p className="mt-0.5 font-semibold text-foreground">{val || "—"}</p>
+                            : (field === "type" || field === "status")
+                              ? <select value={val} onChange={e => updateCapa(act.id, field, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
+                                  {(field === "type" ? ["CA", "PA"] : ["Pending", "In Progress", "Completed"]).map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              : <input type="text" value={val} onChange={e => updateCapa(act.id, field, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground" />
+                          }
                         </div>
                       ))}
                     </div>
                   </div>
                 ))}
-                <div className="flex justify-start">
-                  <Button size="sm" onClick={addCapa} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90">
-                    <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Action Item
-                  </Button>
-                </div>
+                {!reportApproved && (
+                  <div className="flex justify-start">
+                    <Button size="sm" onClick={addCapa} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90">
+                      <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Action Item
+                    </Button>
+                  </div>
+                )}
               </div>
 
               {/* Deployment */}
@@ -5442,23 +5775,192 @@ function CasePage() {
 
             {/* ══ CAPA Validation Checklist ══ */}
             <div className="bg-secondary/15 border border-border/40 rounded-xl p-4 space-y-3">
-              <span className="text-[10px] text-primary font-bold mono block">// CAPA VALIDATION & QUALITY AUDIT CHECKLIST</span>
+              <span className="text-[10px] text-primary font-bold mono block">CAPA VALIDATION & QUALITY AUDIT CHECKLIST</span>
               {[{ key: "rootCauseMapped", label: "Root cause verified and mapped to physical evidence logs" }, { key: "capaFeasible", label: "CAPA actions are immediately feasible and budget-allocated" }, { key: "redundancyMet", label: "Preventive actions build redundancy to prevent multi-point failure recurrence" }].map(chk => (
-                <div key={chk.key} className="flex items-start gap-2.5 p-2 rounded bg-background/30 hover:bg-background/50 transition-colors">
-                  <input type="checkbox" id={`chk-${chk.key}`} checked={!!capaChecklist[chk.key]} onChange={e => setCapaChecklist({ ...capaChecklist, [chk.key]: e.target.checked })} className="rounded border-border bg-background text-primary mt-0.5" />
-                  <label htmlFor={`chk-${chk.key}`} className="cursor-pointer text-xs select-none leading-relaxed text-muted-foreground">{chk.label}</label>
+                <div key={chk.key} className="flex items-start gap-2.5 p-2 rounded bg-background/30">
+                  <input type="checkbox" id={`chk-${chk.key}`} checked={!!capaChecklist[chk.key]}
+                    onChange={e => { if (!reportApproved) setCapaChecklist({ ...capaChecklist, [chk.key]: e.target.checked }); }}
+                    disabled={reportApproved}
+                    className="rounded border-border bg-background text-primary mt-0.5 disabled:opacity-60" />
+                  <label htmlFor={`chk-${chk.key}`} className={`text-xs select-none leading-relaxed ${reportApproved ? "text-muted-foreground/60" : "cursor-pointer text-muted-foreground"}`}>{chk.label}</label>
                 </div>
               ))}
             </div>
 
             {/* ══ Iterative Chat ══ */}
-            <div className="border border-border/50 rounded-xl overflow-hidden">
-              <div className="bg-secondary/25 border-b border-border/40 p-3 flex items-center justify-between">
-                <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// REFINE REPORT & CAPA</p>
-                <span className="text-[10px] text-muted-foreground font-mono">Add CAPA items, update root cause, or generate summary</span>
+            {!reportApproved && (
+              <div className="border border-border/50 rounded-xl overflow-hidden">
+                <div className="bg-secondary/25 border-b border-border/40 p-3 flex items-center justify-between">
+                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">// REFINE REPORT & CAPA</p>
+                  <span className="text-[10px] text-muted-foreground font-mono">Add CAPA items, update root cause, or generate summary</span>
+                </div>
+                {renderIterativePanel("e.g. \"Add a CAPA for seal replacement on a 90-day cycle\" or \"Summarise the root cause in one sentence\"...")}
               </div>
-              {renderIterativePanel("e.g. \"Add a CAPA for seal replacement on a 90-day cycle\" or \"Summarise the root cause in one sentence\"...")}
-            </div>
+            )}
+
+            {/* ══ Sign & Approve Modal ══ */}
+            {showApprovalModal && (
+              <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                  <div className="sticky top-0 bg-card border-b border-border px-6 py-4 flex items-center justify-between z-10">
+                    <div>
+                      <h3 className="font-bold text-base">Complete Report Before Signing</h3>
+                      <p className="text-xs text-muted-foreground mt-0.5">Fill in operational data the AI could not determine. Report will be locked after signing.</p>
+                    </div>
+                    <button onClick={() => setShowApprovalModal(false)} className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-secondary/50">
+                      <XCircle className="w-5 h-5" />
+                    </button>
+                  </div>
+                  <div className="p-6 space-y-6">
+                    {/* Notification Numbers */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">SAP / System Notification Numbers</h4>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">Z2 Notification Number</label>
+                          <input type="text" value={approvalForm.zzNotification} onChange={e => setApprovalForm(f => ({ ...f, zzNotification: e.target.value }))}
+                            placeholder="e.g. ZZ-2026-06-001" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">ZR Notification Number</label>
+                          <input type="text" value={approvalForm.zrNumber} onChange={e => setApprovalForm(f => ({ ...f, zrNumber: e.target.value }))}
+                            placeholder="e.g. ZR-2026-06-001" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Team Members */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">RCA Team Members</h4>
+                      <div className="space-y-2">
+                        {approvalForm.teamMembers.map((m, i) => (
+                          <div key={i} className="grid grid-cols-4 gap-2 items-center">
+                            <input type="text" value={m.name} placeholder={`Name ${i + 1}`} onChange={e => setApprovalForm(f => ({ ...f, teamMembers: f.teamMembers.map((x, xi) => xi === i ? { ...x, name: e.target.value } : x) }))}
+                              className="text-xs p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none col-span-1" />
+                            <input type="text" value={m.dept} placeholder="Department" onChange={e => setApprovalForm(f => ({ ...f, teamMembers: f.teamMembers.map((x, xi) => xi === i ? { ...x, dept: e.target.value } : x) }))}
+                              className="text-xs p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                            <input type="text" value={m.hzlBp} placeholder="HZL/BP/SP" onChange={e => setApprovalForm(f => ({ ...f, teamMembers: f.teamMembers.map((x, xi) => xi === i ? { ...x, hzlBp: e.target.value } : x) }))}
+                              className="text-xs p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                            <select value={m.type} onChange={e => setApprovalForm(f => ({ ...f, teamMembers: f.teamMembers.map((x, xi) => xi === i ? { ...x, type: e.target.value } : x) }))}
+                              className="text-xs p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none">
+                              {["Maintenance", "Engineering", "Operations", "Safety", "Management"].map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                        ))}
+                        <button onClick={() => setApprovalForm(f => ({ ...f, teamMembers: [...f.teamMembers, { name: "", dept: "", hzlBp: "", type: "Operations" }] }))}
+                          className="text-xs text-primary font-mono hover:underline">+ Add member</button>
+                      </div>
+                    </div>
+
+                    {/* Cost of Failure */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Cost of Failure (₹ in Lakhs)</h4>
+                      <div className="grid grid-cols-3 gap-3">
+                        {([["Spare Parts", "sparePartCost"], ["Service", "serviceCost"], ["Manpower", "manpowerCost"], ["Production Loss", "productionLoss"], ["Total Breakdown Cost (₹)", "totalBreakdownCost"]] as [string, keyof typeof approvalForm][]).map(([label, key]) => (
+                          <div key={key}>
+                            <label className="text-[10px] font-mono text-muted-foreground block mb-1">{label}</label>
+                            <input type="text" value={approvalForm[key] as string} onChange={e => setApprovalForm(f => ({ ...f, [key]: e.target.value }))}
+                              placeholder="0" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Maintenance History */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Maintenance History</h4>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">Last PM Date</label>
+                          <input type="text" value={approvalForm.lastPMDate} onChange={e => setApprovalForm(f => ({ ...f, lastPMDate: e.target.value }))}
+                            placeholder="YYYY-MM-DD" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">Last CBM Date</label>
+                          <input type="text" value={approvalForm.cbmDate} onChange={e => setApprovalForm(f => ({ ...f, cbmDate: e.target.value }))}
+                            placeholder="YYYY-MM-DD" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">CBM Status/Result</label>
+                          <input type="text" value={approvalForm.cbmStatus} onChange={e => setApprovalForm(f => ({ ...f, cbmStatus: e.target.value }))}
+                            placeholder="e.g. Normal / Abnormal" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Last Failure */}
+                    <div>
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Last Failure Details</h4>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">Last Failure Date</label>
+                          <input type="text" value={approvalForm.lastFailureDate} onChange={e => setApprovalForm(f => ({ ...f, lastFailureDate: e.target.value }))}
+                            placeholder="YYYY-MM-DD" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-mono text-muted-foreground block mb-1">Root Cause of Last Failure</label>
+                          <input type="text" value={approvalForm.lastFailureRootCause} onChange={e => setApprovalForm(f => ({ ...f, lastFailureRootCause: e.target.value }))}
+                            placeholder="Brief root cause description" className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Modal Footer */}
+                  <div className="sticky bottom-0 bg-card border-t border-border px-6 py-4 flex justify-end gap-3">
+                    <Button variant="outline" onClick={() => setShowApprovalModal(false)}>Cancel</Button>
+                    <Button
+                      disabled={updateAgentMsgMut.isPending}
+                      onClick={() => {
+                        const af = approvalForm;
+                        const mergedReport = {
+                          ...(parsedData || {}),
+                          approved: true,
+                          header: {
+                            ...((parsedData as any)?.header || {}),
+                            ...(af.zzNotification ? { z2NotificationNumber: af.zzNotification } : {}),
+                            ...(af.zrNumber ? { zrNumber: af.zrNumber } : {}),
+                          },
+                          teamMembers: af.teamMembers.filter(m => m.name.trim()).map((m, i) => ({
+                            no: i + 1, name: m.name, department: m.dept, type: m.hzlBp || m.type,
+                          })),
+                          costOfFailure: {
+                            ...((parsedData as any)?.costOfFailure || {}),
+                            ...(af.sparePartCost ? { sparePartCost: af.sparePartCost } : {}),
+                            ...(af.serviceCost ? { serviceCost: af.serviceCost } : {}),
+                            ...(af.manpowerCost ? { manpowerCost: af.manpowerCost } : {}),
+                            ...(af.productionLoss ? { productionLoss: af.productionLoss } : {}),
+                            ...(af.totalBreakdownCost ? { totalBreakdownCost: af.totalBreakdownCost } : {}),
+                          },
+                          maintenanceHistory: {
+                            ...((parsedData as any)?.maintenanceHistory || {}),
+                            ...(af.lastPMDate ? { lastPMDate: af.lastPMDate } : {}),
+                            ...(af.cbmDate ? { cbmDate: af.cbmDate } : {}),
+                            ...(af.cbmStatus ? { cbmStatus: af.cbmStatus } : {}),
+                          },
+                          lastFailure: {
+                            ...((parsedData as any)?.lastFailure || {}),
+                            ...(af.lastFailureDate ? { date: af.lastFailureDate } : {}),
+                            ...(af.lastFailureRootCause ? { rootCause: af.lastFailureRootCause } : {}),
+                          },
+                        };
+                        updateAgentMsgMut.mutate(mergedReport, {
+                          onSuccess: () => {
+                            setReportApproved(true);
+                            setShowApprovalModal(false);
+                            toast.success("Report signed & approved — all fields are now locked.");
+                          },
+                          onError: () => toast.error("Failed to save approval"),
+                        });
+                      }}
+                    >
+                      {updateAgentMsgMut.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Lock className="w-4 h-4 mr-2" />}
+                      Confirm & Sign Report
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         );
       }
@@ -5663,16 +6165,289 @@ function CasePage() {
   return (
     <div className="flex flex-col h-[calc(100vh-7rem)] gap-3 animate-fadeIn">
       {renderAutoModal()}
+
+      {/* ── Share / Make Public Overlay ───────────────────────────────────── */}
+      {showSharePopover && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSharePopover(false)}>
+          <div className="bg-background border border-border rounded-xl p-5 max-w-sm w-full mx-4 shadow-2xl space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-primary" />
+                <h3 className="font-bold text-sm">Public Sharing</h3>
+              </div>
+              <button onClick={() => setShowSharePopover(false)} className="text-muted-foreground hover:text-foreground">
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              When public, anyone with the link can view this completed RCA report and download it.
+            </p>
+            <div className="flex items-center justify-between p-3 bg-secondary/25 rounded-lg border border-border/50">
+              <span className="text-sm font-medium">
+                {caseQ.data?.case.is_public ? "Public — Anyone can view" : "Private — Only authorized users"}
+              </span>
+              <button
+                onClick={async () => {
+                  setTogglingPublic(true);
+                  try {
+                    await togglePublicMut.mutateAsync();
+                  } finally {
+                    setTogglingPublic(false);
+                  }
+                }}
+                disabled={togglingPublic}
+                className={`relative w-11 h-6 rounded-full transition-colors flex items-center ${
+                  caseQ.data?.case.is_public ? "bg-emerald-500" : "bg-secondary border border-border"
+                }`}
+              >
+                {togglingPublic ? (
+                  <Loader2 className="w-3 h-3 animate-spin mx-auto" />
+                ) : (
+                  <span className={`w-5 h-5 rounded-full bg-white shadow transition-transform mx-0.5 ${caseQ.data?.case.is_public ? "translate-x-5" : "translate-x-0"}`} />
+                )}
+              </button>
+            </div>
+            {caseQ.data?.case.is_public && caseQ.data.case.public_slug && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-muted-foreground font-mono">PUBLIC LINK</p>
+                <div className="flex items-center gap-2 p-2 bg-secondary/20 rounded border border-border/50">
+                  <span className="text-xs font-mono text-primary flex-1 truncate">
+                    {typeof window !== "undefined" ? `${window.location.origin}/p/${caseQ.data.case.public_slug}` : `/p/${caseQ.data.case.public_slug}`}
+                  </span>
+                  <button
+                    onClick={() => {
+                      const url = `${window.location.origin}/p/${caseQ.data!.case.public_slug}`;
+                      navigator.clipboard.writeText(url).then(() => {
+                        setPublicLinkCopied(true);
+                        setTimeout(() => setPublicLinkCopied(false), 2000);
+                        toast.success("Link copied!");
+                      });
+                    }}
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                  >
+                    {publicLinkCopied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Collaborators Dialog ──────────────────────────────────────────── */}
+      {showCollabDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowCollabDialog(false)}>
+          <div className="bg-background border border-border rounded-xl max-w-lg w-full mx-4 shadow-2xl flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-border/60">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-primary" />
+                <h3 className="font-bold text-sm">Collaborators</h3>
+              </div>
+              <button onClick={() => setShowCollabDialog(false)} className="text-muted-foreground hover:text-foreground">
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Current collaborators */}
+              <div className="space-y-2">
+                <p className="text-[10px] text-muted-foreground font-mono uppercase font-semibold">Current Collaborators</p>
+                {collabQ.isLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>
+                ) : (collabQ.data?.collaborators ?? []).length === 0 ? (
+                  <p className="text-xs text-muted-foreground italic">No collaborators yet. Add users below.</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {(collabQ.data?.collaborators ?? []).map((c) => (
+                      <div key={c.user_id} className="flex items-center justify-between p-2.5 rounded-lg border border-border/50 bg-secondary/20">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium truncate">{c.full_name || c.email}</p>
+                          {c.full_name && <p className="text-[10px] text-muted-foreground font-mono truncate">{c.email}</p>}
+                        </div>
+                        {caseQ.data?.isOwner && (
+                          <button
+                            onClick={() => removeCollabMut.mutate(c.user_id)}
+                            disabled={removeCollabMut.isPending}
+                            className="ml-2 text-muted-foreground hover:text-destructive shrink-0"
+                            title="Remove collaborator"
+                          >
+                            <UserMinus className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Add collaborator section (owner only) */}
+              {caseQ.data?.isOwner && (
+                <div className="space-y-2 border-t border-border/40 pt-4">
+                  <p className="text-[10px] text-muted-foreground font-mono uppercase font-semibold">Add Collaborator</p>
+                  {usersForCollabQ.isLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="w-3 h-3 animate-spin" /> Loading users…</div>
+                  ) : (
+                    <>
+                      {/* Accepted users */}
+                      {(usersForCollabQ.data?.accepted ?? []).length > 0 ? (
+                        <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                          <p className="text-[9px] text-muted-foreground font-mono">ACCEPTED USERS</p>
+                          {(usersForCollabQ.data?.accepted ?? []).map((u) => (
+                            <div key={u.id} className="flex items-center justify-between p-2 rounded border border-border/40 bg-background/50 hover:bg-secondary/20">
+                              <div className="min-w-0">
+                                <p className="text-xs font-medium truncate">{u.full_name || u.email}</p>
+                                {u.full_name && <p className="text-[10px] text-muted-foreground font-mono truncate">{u.email}</p>}
+                              </div>
+                              <button
+                                onClick={() => addCollabMut.mutate(u.id)}
+                                disabled={addCollabMut.isPending}
+                                className="ml-2 shrink-0 text-primary hover:text-primary/80"
+                                title="Add as collaborator"
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground italic">No other accepted users available to add.</p>
+                      )}
+                      {/* Pending invites */}
+                      {(usersForCollabQ.data?.invited ?? []).length > 0 && (
+                        <div className="space-y-1.5">
+                          <p className="text-[9px] text-amber-500/80 font-mono">INVITED (PENDING ACCEPTANCE)</p>
+                          {(usersForCollabQ.data?.invited ?? []).map((inv) => (
+                            <div key={inv.code} className="flex items-center justify-between p-2 rounded border border-amber-500/20 bg-amber-500/5">
+                              <div className="min-w-0">
+                                <p className="text-xs font-medium truncate text-amber-500/90">{inv.email}</p>
+                                <p className="text-[9px] text-muted-foreground font-mono">Must accept invitation before they can be added</p>
+                              </div>
+                              <Badge className="ml-2 shrink-0 bg-amber-500/10 text-amber-500 border-amber-500/30 text-[9px]">
+                                Invited
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Edit History Panel ────────────────────────────────────────────── */}
+      {showHistoryPanel && (
+        <div className="fixed inset-0 z-50 flex" onClick={() => setShowHistoryPanel(false)}>
+          <div className="flex-1" />
+          <div className="w-80 bg-background border-l border-border shadow-2xl flex flex-col max-h-screen" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-border/60 shrink-0">
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-primary" />
+                <h3 className="font-bold text-sm">Edit History</h3>
+              </div>
+              <button onClick={() => setShowHistoryPanel(false)} className="text-muted-foreground hover:text-foreground">
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {historyQ.isLoading ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground mt-4 justify-center"><Loader2 className="w-3 h-3 animate-spin" /> Loading history…</div>
+              ) : (historyQ.data?.history ?? []).length === 0 ? (
+                <p className="text-xs text-muted-foreground italic text-center mt-8">No edit history yet. Changes to incident details will appear here.</p>
+              ) : (
+                (historyQ.data?.history ?? []).map((entry) => (
+                  <div key={entry.id} className="p-3 rounded-lg border border-border/40 bg-secondary/10 space-y-1.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium truncate">{entry.full_name || entry.email}</p>
+                        <p className="text-[10px] text-muted-foreground font-mono">{entry.summary || entry.section}</p>
+                      </div>
+                      {caseQ.data?.isOwner && entry.section === "incident_data" && (
+                        <button
+                          onClick={() => {
+                            if (window.confirm("Revert incident data to this version? Current data will be saved in history first.")) {
+                              revertMut.mutate(entry.id);
+                            }
+                          }}
+                          disabled={revertMut.isPending}
+                          className="shrink-0 text-[9px] font-mono flex items-center gap-1 text-muted-foreground hover:text-primary border border-border/40 hover:border-primary/40 rounded px-1.5 py-0.5 transition-colors"
+                          title="Revert to this version"
+                        >
+                          <RotateCcw className="w-2.5 h-2.5" />
+                          Revert
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-muted-foreground/60 font-mono">
+                      {new Date(entry.changed_at).toLocaleString()}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="p-3 border-t border-border/40 shrink-0">
+              <p className="text-[9px] text-muted-foreground font-mono text-center">
+                History tracks incident data edits. Click Revert to restore a version.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Agent Progress Bar */}
       <div className="panel p-3">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-muted-foreground mono uppercase">
             RCA Analysis Pipeline
           </span>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <Badge variant="outline" className="text-xs mono">
               {completedAgents.size + skippedAgents.size}/{AGENTS.length} steps
             </Badge>
+            {/* History button */}
+            <button
+              onClick={() => setShowHistoryPanel(true)}
+              className="h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border border-border/60 bg-secondary/30 hover:bg-secondary/60 text-muted-foreground hover:text-foreground transition-colors"
+              title="Edit history"
+            >
+              <History className="w-3 h-3" />
+              <span className="hidden sm:inline">History</span>
+            </button>
+            {/* Collaborators button */}
+            <button
+              onClick={() => setShowCollabDialog(true)}
+              className="h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border border-border/60 bg-secondary/30 hover:bg-secondary/60 text-muted-foreground hover:text-foreground transition-colors"
+              title="Manage collaborators"
+            >
+              <Users className="w-3 h-3" />
+              <span className="hidden sm:inline">Collaborators</span>
+              {(caseQ.data?.collaborators?.length ?? 0) > 0 && (
+                <span className="ml-0.5 bg-primary/20 text-primary rounded-full px-1 text-[9px]">
+                  {caseQ.data!.collaborators!.length}
+                </span>
+              )}
+            </button>
+            {/* Share/Public button */}
+            <button
+              onClick={() => {
+                if (caseQ.data?.case.status !== "completed") {
+                  toast.warning("Complete the RCA first to make it public");
+                  return;
+                }
+                setShowSharePopover(true);
+              }}
+              className={`h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border transition-colors ${
+                caseQ.data?.case.is_public
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+                  : "border-border/60 bg-secondary/30 text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+              }`}
+              title={caseQ.data?.case.status !== "completed" ? "Complete the RCA first" : "Share publicly"}
+            >
+              <Globe className="w-3 h-3" />
+              <span className="hidden sm:inline">{caseQ.data?.case.is_public ? "Public" : "Share"}</span>
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-2.5 overflow-x-auto pb-1">

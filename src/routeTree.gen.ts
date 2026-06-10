@@ -15,6 +15,7 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as RcaCaseIdRouteImport } from './routes/rca.$caseId'
+import { Route as PSlugRouteImport } from './routes/p.$slug'
 
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
@@ -46,6 +47,11 @@ const RcaCaseIdRoute = RcaCaseIdRouteImport.update({
   path: '/rca/$caseId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PSlugRoute = PSlugRouteImport.update({
+  id: '/p/$slug',
+  path: '/p/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -53,6 +59,7 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/p/$slug': typeof PSlugRoute
   '/rca/$caseId': typeof RcaCaseIdRoute
 }
 export interface FileRoutesByTo {
@@ -61,6 +68,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/p/$slug': typeof PSlugRoute
   '/rca/$caseId': typeof RcaCaseIdRoute
 }
 export interface FileRoutesById {
@@ -70,6 +78,7 @@ export interface FileRoutesById {
   '/dashboard': typeof DashboardRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/p/$slug': typeof PSlugRoute
   '/rca/$caseId': typeof RcaCaseIdRoute
 }
 export interface FileRouteTypes {
@@ -80,9 +89,17 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/login'
     | '/signup'
+    | '/p/$slug'
     | '/rca/$caseId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/dashboard' | '/login' | '/signup' | '/rca/$caseId'
+  to:
+    | '/'
+    | '/admin'
+    | '/dashboard'
+    | '/login'
+    | '/signup'
+    | '/p/$slug'
+    | '/rca/$caseId'
   id:
     | '__root__'
     | '/'
@@ -90,6 +107,7 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/login'
     | '/signup'
+    | '/p/$slug'
     | '/rca/$caseId'
   fileRoutesById: FileRoutesById
 }
@@ -99,6 +117,7 @@ export interface RootRouteChildren {
   DashboardRoute: typeof DashboardRoute
   LoginRoute: typeof LoginRoute
   SignupRoute: typeof SignupRoute
+  PSlugRoute: typeof PSlugRoute
   RcaCaseIdRoute: typeof RcaCaseIdRoute
 }
 
@@ -146,6 +165,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RcaCaseIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/p/$slug': {
+      id: '/p/$slug'
+      path: '/p/$slug'
+      fullPath: '/p/$slug'
+      preLoaderRoute: typeof PSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -155,6 +181,7 @@ const rootRouteChildren: RootRouteChildren = {
   DashboardRoute: DashboardRoute,
   LoginRoute: LoginRoute,
   SignupRoute: SignupRoute,
+  PSlugRoute: PSlugRoute,
   RcaCaseIdRoute: RcaCaseIdRoute,
 }
 export const routeTree = rootRouteImport

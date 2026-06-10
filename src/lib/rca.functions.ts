@@ -366,8 +366,34 @@ interface CaseRow {
   status: string;
   incident_data: string | null;
   final_report: string | null;
+  is_public: number;
+  public_slug: string | null;
   created_at: string;
   updated_at: string;
+}
+
+function isCaseAccessible(
+  db: ReturnType<typeof getDb>,
+  caseId: string,
+  userId: string,
+  userRole: string,
+): boolean {
+  const row = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(caseId) as
+    | { user_id: string }
+    | undefined;
+  if (!row) return false;
+  if (row.user_id === userId || userRole === "admin") return true;
+  const collab = db
+    .prepare("SELECT id FROM case_collaborators WHERE case_id = ? AND user_id = ?")
+    .get(caseId, userId);
+  return !!collab;
+}
+
+function generatePublicSlug(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let s = "";
+  for (let i = 0; i < 14; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
 }
 
 // ─── Data-only question builders ──────────────────────────────────────────────
@@ -505,7 +531,12 @@ const STRUCTURED_TASK_LINES: Record<string, string> = {
   pareto: "Identify and rank all failure modes from the findings above.",
   timeline: "Reconstruct the incident timeline using all known timestamps, symptoms, and findings above.",
   equipment: "Derive the reliability metrics and RPN risk scores for the equipment involved in this incident.",
-  report: "Synthesise all the findings above into the complete RCA report JSON.",
+  report: `Synthesise all findings above into the complete RCA report JSON.
+CRITICAL RULE — DO NOT INVENT DATA: For any field you cannot reliably determine from the analysis (e.g. SAP notification numbers, team member names, actual rupee cost figures, PM/CBM dates, last failure history), set the value to null and add an entry to the "pendingQuestions" array instead.
+The "pendingQuestions" array must list every field you could not fill with real data:
+  { "field": "fieldName", "label": "Human-readable field label", "hint": "What the operator should provide" }
+Examples of fields that MUST go into pendingQuestions if unknown: zzNotificationNumber, zrNumber, teamMembers, costOfFailure (sparePartCost/serviceCost/manpowerCost/productionLoss), maintenanceHistory.lastPMDate, maintenanceHistory.cbmDate, lastFailure.date, lastFailure.rootCause.
+Do NOT generate placeholder names like "Rahul Sharma", placeholder numbers like "ZZ-2026-001", or placeholder cost values like 15000. Leave them null and put them in pendingQuestions.`,
 };
 
 // Assemble the prior-agent findings block + the task line for a structured agent.
@@ -924,8 +955,9 @@ export const ensureConversation = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { userId } = context;
+    const { userId, user } = context;
     const db = getDb();
+    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
     const existing = db
       .prepare(
         "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
@@ -963,7 +995,7 @@ export const getCaseFull = createServerFn({ method: "POST" })
       | CaseRow
       | undefined;
     if (!rcaCase) throw new Error("Case not found");
-    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
 
     const conversations = db
       .prepare(`
@@ -975,7 +1007,19 @@ export const getCaseFull = createServerFn({ method: "POST" })
         ORDER BY c.created_at
       `)
       .all(data.caseId) as (ConversationRow & { message_count: number })[];
-    return { case: rcaCase, conversations };
+
+    const collaborators = db
+      .prepare(`
+        SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
+        FROM case_collaborators cc
+        JOIN users u ON u.id = cc.user_id
+        WHERE cc.case_id = ?
+        ORDER BY cc.added_at ASC
+      `)
+      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+
+    const isOwner = rcaCase.user_id === userId;
+    return { case: rcaCase, conversations, collaborators, isOwner };
   });
 
 export const getConversationMessages = createServerFn({ method: "POST" })
@@ -994,10 +1038,21 @@ export const listMyCases = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { userId } = context;
     const db = getDb();
-    const cases = db
-      .prepare("SELECT * FROM rca_cases WHERE user_id = ? ORDER BY updated_at DESC")
-      .all(userId) as CaseRow[];
-    return { cases };
+    const owned = db
+      .prepare("SELECT *, 0 as is_collaborator FROM rca_cases WHERE user_id = ?")
+      .all(userId) as (CaseRow & { is_collaborator: number })[];
+    const collaborated = db
+      .prepare(`
+        SELECT r.*, 1 as is_collaborator
+        FROM rca_cases r
+        JOIN case_collaborators cc ON cc.case_id = r.id
+        WHERE cc.user_id = ? AND r.user_id != ?
+      `)
+      .all(userId, userId) as (CaseRow & { is_collaborator: number })[];
+    const all = [...owned, ...collaborated].sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    );
+    return { cases: all };
   });
 
 export const deleteCase = createServerFn({ method: "POST" })
@@ -1050,6 +1105,28 @@ export const truncateMessagesAfter = createServerFn({ method: "POST" })
     db.prepare(
       "DELETE FROM messages WHERE conversation_id = ? AND created_at > ?",
     ).run(data.conversationId, msg.created_at);
+    return { ok: true };
+  });
+
+export const updateUserMessage = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) =>
+    z.object({ conversationId: z.string(), messageId: z.string(), content: z.string() }).parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    const db = getDb();
+    const conv = db
+      .prepare("SELECT user_id FROM conversations WHERE id = ?")
+      .get(data.conversationId) as { user_id: string } | undefined;
+    if (!conv) throw new Error("Conversation not found");
+    if (conv.user_id !== userId) throw new Error("Forbidden");
+    const msg = db
+      .prepare("SELECT id, role FROM messages WHERE id = ? AND conversation_id = ?")
+      .get(data.messageId, data.conversationId) as { id: string; role: string } | undefined;
+    if (!msg) throw new Error("Message not found");
+    if (msg.role !== "user") throw new Error("Can only edit user messages");
+    db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(data.content, data.messageId);
     return { ok: true };
   });
 
@@ -1338,14 +1415,23 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
     // 1. Fetch case to ensure it exists
     const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
     if (!rcaCase) throw new Error("Case not found");
+    if (!isCaseAccessible(db, data.caseId, userId, "user")) throw new Error("Forbidden");
 
-    // 2. Parse current incident_data to keep attachments
+    // 2. Parse current incident_data to keep attachments; save snapshot for history
     let attachments: any[] = [];
     if (rcaCase.incident_data) {
       try {
         const parsed = JSON.parse(rcaCase.incident_data);
         attachments = parsed.attachments || [];
       } catch {}
+    }
+
+    // Save history snapshot before overwriting
+    if (rcaCase.incident_data) {
+      const histId = generateId();
+      db.prepare(
+        "INSERT INTO rca_edit_history (id, case_id, user_id, section, snapshot, summary) VALUES (?, ?, ?, 'incident_data', ?, ?)",
+      ).run(histId, data.caseId, userId, rcaCase.incident_data, "Updated incident details");
     }
 
     const updatedIncidentObj = {
@@ -2017,21 +2103,51 @@ export const runFullAutomation = createServerFn({ method: "POST" })
  * Single source of truth for all export formats.
  */
 async function buildCaseReport(db: ReturnType<typeof getDb>, caseId: string, userId: string) {
-  const convo = db
-    .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?")
-    .get(caseId, userId) as { id: string } | undefined;
-
   let reportJson: any = null;
-  if (convo) {
-    const lastMsg = db
-      .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
-      .get(convo.id) as { content: string; raw_response: string } | undefined;
-    if (lastMsg) {
-      for (const src of [lastMsg.content, lastMsg.raw_response]) {
-        if (!src) continue;
-        const j = extractFirstJsonString(src) ?? src;
-        try { reportJson = JSON.parse(j); break; } catch {}
+
+  // If userId is provided, try the specific user's conversation first
+  if (userId) {
+    const convo = db
+      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?")
+      .get(caseId, userId) as { id: string } | undefined;
+    if (convo) {
+      const lastMsg = db
+        .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
+        .get(convo.id) as { content: string; raw_response: string } | undefined;
+      if (lastMsg) {
+        for (const src of [lastMsg.content, lastMsg.raw_response]) {
+          if (!src) continue;
+          const j = extractFirstJsonString(src) ?? src;
+          try { reportJson = JSON.parse(j); break; } catch {}
+        }
       }
+    }
+  }
+
+  // Fall back to any report conversation for this case (for public downloads or when user has no convo)
+  if (!reportJson) {
+    const anyConvo = db
+      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' ORDER BY created_at DESC LIMIT 1")
+      .get(caseId) as { id: string } | undefined;
+    if (anyConvo) {
+      const lastMsg = db
+        .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
+        .get(anyConvo.id) as { content: string; raw_response: string } | undefined;
+      if (lastMsg) {
+        for (const src of [lastMsg.content, lastMsg.raw_response]) {
+          if (!src) continue;
+          const j = extractFirstJsonString(src) ?? src;
+          try { reportJson = JSON.parse(j); break; } catch {}
+        }
+      }
+    }
+  }
+
+  // Last resort: use final_report stored on the case
+  if (!reportJson) {
+    const caseRow = db.prepare("SELECT final_report FROM rca_cases WHERE id = ?").get(caseId) as { final_report: string | null } | undefined;
+    if (caseRow?.final_report) {
+      try { reportJson = JSON.parse(caseRow.final_report); } catch {}
     }
   }
 
@@ -2305,4 +2421,248 @@ export const getCombinedAnalysis = createServerFn({ method: "POST" })
       equipment: getAgentLastMsg("equipment") || {},
       report: getAgentLastMsg("report") || {},
     };
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public access — toggle & fetch
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const toggleCasePublic = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+    if (rcaCase.status !== "completed") throw new Error("Only completed RCAs can be made public");
+
+    const willBePublic = !rcaCase.is_public;
+    let slug = rcaCase.public_slug;
+    if (willBePublic && !slug) {
+      slug = generatePublicSlug();
+      // Ensure uniqueness
+      while (db.prepare("SELECT id FROM rca_cases WHERE public_slug = ?").get(slug)) {
+        slug = generatePublicSlug();
+      }
+    }
+    db.prepare("UPDATE rca_cases SET is_public = ?, public_slug = ? WHERE id = ?").run(
+      willBePublic ? 1 : 0,
+      slug,
+      data.caseId,
+    );
+    return { is_public: willBePublic, public_slug: slug };
+  });
+
+export const getPublicCase = createServerFn({ method: "POST" })
+  .inputValidator((input) => z.object({ slug: z.string() }).parse(input))
+  .handler(async ({ data }) => {
+    const db = getDb();
+    const rcaCase = db
+      .prepare("SELECT * FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'")
+      .get(data.slug) as CaseRow | undefined;
+    if (!rcaCase) return null;
+    return {
+      id: rcaCase.id,
+      title: rcaCase.title,
+      asset_id: rcaCase.asset_id,
+      status: rcaCase.status,
+      incident_data: rcaCase.incident_data,
+      final_report: rcaCase.final_report,
+      created_at: rcaCase.created_at,
+      updated_at: rcaCase.updated_at,
+    };
+  });
+
+export const downloadPublicReport = createServerFn({ method: "POST" })
+  .inputValidator((input) => z.object({ slug: z.string(), format: z.enum(["xlsx", "docx", "pdf", "html"]) }).parse(input))
+  .handler(async ({ data }) => {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id, title, asset_id FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'")
+      .get(data.slug) as { id: string; title: string; asset_id: string } | undefined;
+    if (!row) throw new Error("Not found");
+    const { report, image, imageDataUri } = await buildCaseReport(db, row.id, "");
+    const base = `RCA-Report-${row.asset_id || row.id}`;
+    const { generateRcaXlsx, generateRcaDocx, generateRcaHtml } = await import("./rca.report");
+    if (data.format === "xlsx") {
+      const buf = await generateRcaXlsx(report, image);
+      return { base64: buf.toString("base64"), mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename: `${base}.xlsx` };
+    } else if (data.format === "pdf") {
+      const html = generateRcaHtml(report, imageDataUri);
+      const buf = await htmlToPdf(html);
+      return { base64: buf.toString("base64"), mimeType: "application/pdf", filename: `${base}.pdf` };
+    } else if (data.format === "html") {
+      const html = generateRcaHtml(report, imageDataUri);
+      return { base64: Buffer.from(html, "utf-8").toString("base64"), mimeType: "text/html", filename: `${base}.html` };
+    } else {
+      const buf = await generateRcaDocx(report, image);
+      return { base64: buf.toString("base64"), mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename: `${base}.docx` };
+    }
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Collaborators
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const listCollaborators = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const collabs = db
+      .prepare(`
+        SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
+        FROM case_collaborators cc
+        JOIN users u ON u.id = cc.user_id
+        WHERE cc.case_id = ?
+        ORDER BY cc.added_at ASC
+      `)
+      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+    return { collaborators: collabs };
+  });
+
+export const listUsersForCollaboration = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+
+    // Accepted users (have accounts), excluding case owner and existing collaborators
+    const accepted = db
+      .prepare(`
+        SELECT u.id, u.email, u.full_name
+        FROM users u
+        WHERE u.id != ?
+          AND u.id NOT IN (SELECT user_id FROM case_collaborators WHERE case_id = ?)
+        ORDER BY u.full_name, u.email
+      `)
+      .all(rcaCase.user_id, data.caseId) as Array<{ id: string; email: string; full_name: string | null }>;
+
+    // Pending invites (email-specific, not yet used)
+    const invited = db
+      .prepare(`
+        SELECT code, email, created_at, expires_at
+        FROM invites
+        WHERE used_at IS NULL
+          AND expires_at > datetime('now')
+          AND email IS NOT NULL
+        ORDER BY created_at DESC
+      `)
+      .all() as Array<{ code: string; email: string; created_at: string; expires_at: string }>;
+
+    return { accepted, invited };
+  });
+
+export const addCollaborator = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string(), targetUserId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+    if (data.targetUserId === rcaCase.user_id) throw new Error("Owner is already the case owner");
+
+    const targetUser = db.prepare("SELECT id, email, full_name FROM users WHERE id = ?").get(data.targetUserId) as
+      | { id: string; email: string; full_name: string | null }
+      | undefined;
+    if (!targetUser) throw new Error("User not found");
+
+    try {
+      const id = generateId();
+      db.prepare(
+        "INSERT INTO case_collaborators (id, case_id, user_id, added_by) VALUES (?, ?, ?, ?)",
+      ).run(id, data.caseId, data.targetUserId, userId);
+    } catch {
+      // UNIQUE constraint — already a collaborator, silently ignore
+    }
+
+    const collabs = db
+      .prepare(`
+        SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
+        FROM case_collaborators cc
+        JOIN users u ON u.id = cc.user_id
+        WHERE cc.case_id = ?
+        ORDER BY cc.added_at ASC
+      `)
+      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+    return { collaborators: collabs };
+  });
+
+export const removeCollaborator = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string(), collaboratorUserId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+    db.prepare("DELETE FROM case_collaborators WHERE case_id = ? AND user_id = ?").run(data.caseId, data.collaboratorUserId);
+    return { ok: true };
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit history
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const getEditHistory = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const history = db
+      .prepare(`
+        SELECT h.id, h.case_id, h.user_id, h.section, h.summary, h.changed_at,
+               u.full_name, u.email
+        FROM rca_edit_history h
+        JOIN users u ON u.id = h.user_id
+        WHERE h.case_id = ?
+        ORDER BY h.changed_at DESC
+        LIMIT 100
+      `)
+      .all(data.caseId) as Array<{
+        id: string; case_id: string; user_id: string; section: string;
+        summary: string | null; changed_at: string; full_name: string | null; email: string;
+      }>;
+    return { history };
+  });
+
+export const revertEditVersion = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string(), historyId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const db = getDb();
+    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+    if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+
+    const histEntry = db
+      .prepare("SELECT section, snapshot FROM rca_edit_history WHERE id = ? AND case_id = ?")
+      .get(data.historyId, data.caseId) as { section: string; snapshot: string | null } | undefined;
+    if (!histEntry || !histEntry.snapshot) throw new Error("History entry not found or has no snapshot");
+
+    if (histEntry.section === "incident_data") {
+      // Save current state as a new history entry first
+      if (rcaCase.incident_data) {
+        const newHistId = generateId();
+        db.prepare(
+          "INSERT INTO rca_edit_history (id, case_id, user_id, section, snapshot, summary) VALUES (?, ?, ?, 'incident_data', ?, ?)",
+        ).run(newHistId, data.caseId, userId, rcaCase.incident_data, "Reverted to earlier version");
+      }
+      db.prepare("UPDATE rca_cases SET incident_data = ? WHERE id = ?").run(histEntry.snapshot, data.caseId);
+    }
+    return { ok: true };
   });

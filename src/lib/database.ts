@@ -29,6 +29,47 @@ export function getDb(): Database.Database {
   return _db;
 }
 
+function runMigrations(db: Database.Database) {
+  // Add new columns to rca_cases (ignore errors if already exist)
+  for (const sql of [
+    "ALTER TABLE rca_cases ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE rca_cases ADD COLUMN public_slug TEXT",
+  ]) {
+    try { db.exec(sql); } catch { /* column already exists */ }
+  }
+
+  // New collaboration and history tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_collaborators (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      added_by TEXT NOT NULL,
+      added_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(case_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rca_edit_history (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      section TEXT NOT NULL,
+      snapshot TEXT,
+      summary TEXT,
+      changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_collaborators_case ON case_collaborators(case_id);
+    CREATE INDEX IF NOT EXISTS idx_collaborators_user ON case_collaborators(user_id);
+    CREATE INDEX IF NOT EXISTS idx_edit_history_case ON rca_edit_history(case_id, changed_at);
+  `);
+}
+
 function initializeTables() {
   const db = getDb();
   db.exec(`
@@ -127,6 +168,8 @@ function initializeTables() {
 
     CREATE INDEX IF NOT EXISTS idx_invites_code ON invites(code);
   `);
+
+  runMigrations(db);
 
   const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
   if (userCount.count === 0) {
