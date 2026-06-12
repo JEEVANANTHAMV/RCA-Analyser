@@ -70,6 +70,14 @@ import {
   RotateCcw,
   Maximize2,
   Minimize2,
+  Database,
+  CalendarClock,
+  Wrench,
+  HelpCircle,
+  GitFork,
+  BarChart2,
+  FileOutput,
+  Fish,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -266,6 +274,42 @@ function CasePage() {
   const currentAgent = AGENTS[agentStep];
 
   const [showChat, setShowChat] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState<Date | null>(null);
+  const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "error" | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      if (window.innerWidth < 1440) {
+        setSidebarCollapsed(true);
+      }
+      const params = new URLSearchParams(window.location.search);
+      const stepParam = params.get("step");
+      if (stepParam) {
+        const stepIdx = parseInt(stepParam, 10);
+        if (!isNaN(stepIdx) && stepIdx >= 0 && stepIdx < AGENTS.length) {
+          setAgentStep(stepIdx);
+        }
+      }
+    }
+  }, []);
+
+  const openChatConsole = (initialInput?: string) => {
+    setShowChat(true);
+    if (initialInput) {
+      setInput(initialInput);
+    }
+    if (typeof window !== "undefined" && window.innerWidth < 1440) {
+      setSidebarCollapsed(true);
+    }
+  };
+
+  const toggleChatConsole = () => {
+    const nextShowChat = !showChat;
+    setShowChat(nextShowChat);
+    if (nextShowChat && typeof window !== "undefined" && window.innerWidth < 1440) {
+      setSidebarCollapsed(true);
+    }
+  };
 
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [editProblemStatement, setEditProblemStatement] = useState("");
@@ -444,13 +488,19 @@ function CasePage() {
         }
       });
     },
+    onMutate: () => {
+      setSaveStatus("saving");
+    },
     onSuccess: (_, variables) => {
       qc.invalidateQueries({ queryKey: ["msgs", convIdRef.current] });
       qc.invalidateQueries({ queryKey: ["case", caseId] });
       setIsDirty(false);
+      setSaveStatus("saved");
+      setLastSavedTime(new Date());
       if (!variables?.silent) toast.success("Incident problem details saved and validated!");
     },
     onError: (err: any) => {
+      setSaveStatus("error");
       toast.error(err.message || "Failed to save details");
     }
   });
@@ -468,12 +518,18 @@ function CasePage() {
         }
       });
     },
+    onMutate: () => {
+      setSaveStatus("saving");
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["msgs", convId] });
       setIsDirty(false);
+      setSaveStatus("saved");
+      setLastSavedTime(new Date());
       toast.success("Edits saved and updated in active findings!");
     },
     onError: (err: any) => {
+      setSaveStatus("error");
       toast.error(err.message || "Failed to save edits");
     }
   });
@@ -490,11 +546,17 @@ function CasePage() {
         }
       });
     },
+    onMutate: () => {
+      setSaveStatus("saving");
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["msgs", convId] });
       setIsDirty(false);
+      setSaveStatus("saved");
+      setLastSavedTime(new Date());
     },
     onError: (err: any) => {
+      setSaveStatus("error");
       toast.error(err.message || "Failed to auto-save status");
     }
   });
@@ -553,12 +615,20 @@ function CasePage() {
   const revertFn = useServerFn(revertEditVersion);
   const revertMut = useMutation({
     mutationFn: (historyId: string) => revertFn({ data: { caseId, historyId } }),
+    onMutate: () => {
+      setSaveStatus("saving");
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case", caseId] });
       qc.invalidateQueries({ queryKey: ["edit-history", caseId] });
+      setSaveStatus("saved");
+      setLastSavedTime(new Date());
       toast.success("Reverted to earlier version");
     },
-    onError: (e: any) => toast.error(e.message || "Revert failed"),
+    onError: (e: any) => {
+      setSaveStatus("error");
+      toast.error(e.message || "Revert failed");
+    },
   });
 
   const ensure = useServerFn(ensureConversation);
@@ -681,10 +751,18 @@ function CasePage() {
         : { text: last?.content ?? "" };
       return saveReport({ data: { caseId, report: reportData } });
     },
+    onMutate: () => {
+      setSaveStatus("saving");
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case", caseId] });
+      setSaveStatus("saved");
+      setLastSavedTime(new Date());
       toast.success("Final report saved!");
     },
+    onError: () => {
+      setSaveStatus("error");
+    }
   });
 
   const clearChatFn = useServerFn(clearConversationMessages);
@@ -907,6 +985,40 @@ function CasePage() {
   let parsedData = currentAgent
     ? (agentParsedData[currentAgent.key] || (immediateParsed && typeof immediateParsed === "object" ? immediateParsed : null))
     : null;
+
+  const isAgentStepLoading = (agentKey: AgentKey): boolean => {
+    if (!currentAgent || currentAgent.key !== agentKey) return false;
+
+    if (agentKey === "fishbone") {
+      const fishboneHasMessageHistory = messages.some((m: any) => {
+        if (m.role !== "assistant") return false;
+        try {
+          const p = parseMaybeJson(m.content);
+          return p && p.step;
+        } catch { return false; }
+      });
+      const fishboneHasHistory = fishboneHistory.length > 0 || fishboneStep !== null || fishboneHasMessageHistory;
+      return (
+        hypothesisMut.isPending ||
+        isStreaming ||
+        (msgsQ.isFetching && !fishboneHasHistory) ||
+        (hypothesisMut.isSuccess && !fishboneHasHistory)
+      ) && !fishboneHasHistory;
+    }
+
+    if (agentKey === "five_why") {
+      const hasAnyWhy = messages.some((m: any) => {
+        if (m.role !== "assistant") return false;
+        try {
+          const parsed = parseMaybeJson(m.content);
+          return parsed && (parsed.question || parsed.whyStep);
+        } catch { return false; }
+      });
+      return (hypothesisMut.isPending || isStreaming) && !hasAnyWhy;
+    }
+
+    return (isStreaming || hypothesisMut.isPending) && !parsedData;
+  };
 
   // Inject the canonical compact shape so the visual workspace (Pareto chart, Gantt,
   // fishbone diagram, equipment metrics) renders regardless of which schema the agent
@@ -1587,7 +1699,7 @@ function CasePage() {
         const completeness = calculateCompleteness();
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <div className="flex items-center gap-2">
                 <span className={`h-2 w-2 rounded-full ${editLocked ? "bg-red-500" : "bg-emerald-500 animate-ping"}`} />
@@ -1598,62 +1710,64 @@ function CasePage() {
               </Badge>
             </div>
 
-            {/* Completeness Score Bar */}
-            <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-2">
-              <div className="flex justify-between items-center text-xs mono">
-                <span>DATA COMPLETENESS INDEX</span>
-                <span className="font-bold text-primary">{completeness}%</span>
+            {/* Control Panel Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Verification & Actions */}
+              <div className="flex justify-between items-center bg-secondary/25 p-3.5 border border-border/50 rounded-xl gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-bold mono tracking-wider uppercase text-foreground truncate">VERIFICATION PANEL</p>
+                  <p className="text-[10px] text-muted-foreground truncate">{editLocked ? "Findings approved & locked" : "Draft state (editable)"}</p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant={editLocked ? "destructive" : "default"}
+                    onClick={() => {
+                      const nextLock = !editLocked;
+                      setEditLocked(nextLock);
+                      saveCollectorMut.mutate({ locked: nextLock });
+                    }}
+                    disabled={saveCollectorMut.isPending}
+                    className="h-8 text-[11px]"
+                  >
+                    {editLocked ? (
+                      <>
+                        <Unlock className="w-3 h-3 mr-1" />
+                        Unlock
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-3 h-3 mr-1" />
+                        Approve & Lock
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => saveCollectorMut.mutate({})}
+                    disabled={editLocked || saveCollectorMut.isPending}
+                    className="h-8 text-[11px]"
+                  >
+                    {saveCollectorMut.isPending ? (
+                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Saving…</>
+                    ) : isDirty ? "Save Draft*" : "Save Draft"}
+                  </Button>
+                </div>
               </div>
-              <div className="h-2.5 bg-background border border-border/30 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-500"
-                  style={{ width: `${completeness}%` }}
-                />
-              </div>
-              <p className="text-[10px] text-muted-foreground">
-                Ensure all required fields, including structured telemetry checklist details, are filled before locking the case input.
-              </p>
-            </div>
 
-            {/* Actions Bar */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-secondary/25 p-4 border border-border/50 rounded-lg gap-3">
-              <div>
-                <p className="text-sm font-semibold">Verify AI Problem Statement & Telemetry</p>
-                <p className="text-xs text-muted-foreground">Adjust findings below to lock in the canonical facts for downstream steps.</p>
-              </div>
-              <div className="flex gap-2 shrink-0">
-                <Button
-                  size="sm"
-                  variant={editLocked ? "destructive" : "default"}
-                  onClick={() => {
-                    const nextLock = !editLocked;
-                    setEditLocked(nextLock);
-                    saveCollectorMut.mutate({ locked: nextLock });
-                  }}
-                  disabled={saveCollectorMut.isPending}
-                >
-                  {editLocked ? (
-                    <>
-                      <Unlock className="w-3.5 h-3.5 mr-1.5" />
-                      Unlock Findings
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-3.5 h-3.5 mr-1.5" />
-                      Approve & Lock
-                    </>
-                  )}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => saveCollectorMut.mutate({})}
-                  disabled={editLocked || saveCollectorMut.isPending}
-                >
-                  {saveCollectorMut.isPending ? (
-                    <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Saving…</>
-                  ) : isDirty ? "Save Draft*" : "Save Draft"}
-                </Button>
+              {/* Data Completeness Score */}
+              <div className="bg-secondary/30 border border-border/50 rounded-xl p-3.5 flex flex-col justify-center gap-1.5">
+                <div className="flex justify-between items-center text-[10px] mono">
+                  <span className="text-muted-foreground">DATA COMPLETENESS INDEX</span>
+                  <span className="font-bold text-primary">{completeness}%</span>
+                </div>
+                <div className="h-2 bg-background border border-border/30 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-amber-500 to-emerald-500 transition-all duration-500"
+                    style={{ width: `${completeness}%` }}
+                  />
+                </div>
               </div>
             </div>
 
@@ -1779,8 +1893,7 @@ function CasePage() {
                         variant="ghost"
                         className="h-6 text-[10px] text-primary hover:text-primary font-mono gap-1"
                         onClick={() => {
-                          setShowChat(true);
-                          setInput(`Regarding the identified gap: "${gap}". Can you help analyze this gap and suggest how we should resolve it?`);
+                          openChatConsole(`Regarding the identified gap: "${gap}". Can you help analyze this gap and suggest how we should resolve it?`);
                           toast.info("Prompt generated in Chat Console!");
                         }}
                       >
@@ -1992,7 +2105,7 @@ function CasePage() {
         };
 
         return (
-          <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <div>
                 <h3 className="font-bold text-lg mono uppercase">5 Why Root Cause Investigation</h3>
@@ -2677,7 +2790,7 @@ function CasePage() {
           const currentStepType: string = (fishboneStep?.type ?? derivedData?.type) || "problem_confirm";
 
           return (
-            <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div ref={fiveWhyScrollRef} className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
               <div className="flex items-center justify-between border-b border-border/60 pb-3">
                 <div>
                   <h3 className="font-bold text-lg mono uppercase">Fishbone Guided Investigation</h3>
@@ -3590,7 +3703,7 @@ function CasePage() {
         const bottomCats = allCategories.slice(Math.ceil(allCategories.length / 2));
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-lg mono uppercase">Ishikawa Fishbone Diagram</h3>
               <div className="flex gap-2 items-center">
@@ -4017,7 +4130,7 @@ function CasePage() {
         };
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-lg mono uppercase">Logical Fault Tree Analysis (FTA)</h3>
               <Button size="sm" onClick={saveFaultTree} disabled={updateAgentMsgMut.isPending}>
@@ -4346,7 +4459,7 @@ function CasePage() {
         };
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-lg mono uppercase">Pareto Analytics Dashboard</h3>
               <div className="flex gap-2">
@@ -4598,7 +4711,7 @@ function CasePage() {
         };
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-lg mono uppercase">Chronological sequence of events</h3>
               <div className="flex gap-2">
@@ -5059,7 +5172,7 @@ function CasePage() {
         };
 
         return (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <div className="flex-1 overflow-y-auto p-4 xl:p-6 space-y-4 xl:space-y-6">
             <div className="flex items-center justify-between border-b border-border/60 pb-3">
               <h3 className="font-bold text-lg mono uppercase">Equipment Reliability & Asset Diagnostics</h3>
               <div className="flex gap-2">
@@ -5303,13 +5416,17 @@ function CasePage() {
           if (!node) return null;
           const isGate = node.type === "gate";
           const prob = typeof node.probability === "number" ? `${(node.probability * 100).toFixed(1)}%` : null;
-          const probColor = node.probability > 0.5 ? "text-red-400" : node.probability > 0.2 ? "text-amber-400" : "text-green-400";
+          const probColor = node.probability > 0.5 ? "text-red-500" : node.probability > 0.2 ? "text-amber-500" : "text-emerald-500";
           return (
             <div key={node.id || node.label} style={{ marginLeft: depth * 20 }}>
-              <div className={`flex items-center gap-2 py-1 px-2 rounded my-0.5 ${isGate ? "bg-amber-950/30 border border-amber-500/20" : "bg-blue-950/20 border border-blue-500/10"}`}>
-                <span className={`text-[10px] font-mono ${isGate ? "text-amber-400" : "text-blue-400"}`}>{isGate ? "◈" : "◉"}</span>
-                <span className={`text-xs font-medium flex-1 ${isGate ? "text-amber-100" : "text-slate-300"}`}>{node.label}</span>
-                {isGate && node.gateType && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-amber-900/40 text-amber-400 rounded border border-amber-500/20">{node.gateType}</span>}
+              <div className={`flex items-center gap-2 py-1 px-2 rounded my-0.5 ${
+                isGate
+                  ? "bg-amber-500/10 border border-amber-500/25"
+                  : "bg-blue-500/8 border border-blue-500/15"
+              }`}>
+                <span className={`text-[10px] font-mono ${isGate ? "text-amber-500" : "text-blue-500"}`}>{isGate ? "◈" : "◉"}</span>
+                <span className={`text-xs font-medium flex-1 text-foreground`}>{node.label}</span>
+                {isGate && node.gateType && <span className="text-[9px] font-mono px-1.5 py-0.5 bg-amber-500/15 text-amber-600 dark:text-amber-400 rounded border border-amber-500/25">{node.gateType}</span>}
                 {prob && <span className={`text-[10px] font-mono font-bold ${probColor}`}>{prob}</span>}
               </div>
               {Array.isArray(node.children) && node.children.map((c: any) => renderFtaTree(c, depth + 1))}
@@ -5355,8 +5472,8 @@ function CasePage() {
             </div>
 
             {/* ══ Download Panel ══ */}
-            <div className="bg-gradient-to-r from-blue-950/50 to-indigo-950/50 border border-blue-500/25 rounded-xl p-4">
-              <p className="text-[10px] font-bold mono text-blue-300 mb-3">// DOWNLOAD COMPLETE REPORT</p>
+            <div className="bg-secondary/30 border border-border rounded-xl p-4">
+              <p className="text-[10px] font-bold mono text-primary mb-3">// DOWNLOAD COMPLETE REPORT</p>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" className="bg-emerald-700 hover:bg-emerald-600 text-white gap-1.5 h-8"
                   onClick={async () => { setReportDownloading("xlsx"); try { const r = await downloadReportFn({ data: { caseId, format: "xlsx" } }); if (!r?.base64) throw new Error("No data"); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Excel downloaded"); } catch (e: any) { toast.error(e.message); } finally { setReportDownloading(null); } }}
@@ -5376,15 +5493,15 @@ function CasePage() {
                 </Button>
                 <div className="h-8 w-px bg-border/60 mx-1" />
                 <button onClick={async () => { setExportDownloading("html"); try { const r = await exportFullAnalysisFn({ data: { caseId, format: "html-full" } }); if (!r?.base64) throw new Error(); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full 8-step HTML exported"); } catch (e: any) { toast.error("Export failed"); } finally { setExportDownloading(null); } }}
-                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-emerald-950/60 text-emerald-400 hover:bg-emerald-900/60 border border-emerald-500/20 disabled:opacity-50">
+                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15 border border-emerald-500/30 disabled:opacity-50">
                   {exportDownloading === "html" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Full HTML (8 steps)
                 </button>
                 <button onClick={async () => { setExportDownloading("docx"); try { const r = await exportFullAnalysisFn({ data: { caseId, format: "docx" } }); if (!r?.base64) throw new Error(); const b = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0)); const bl = new Blob([b], { type: r.mimeType }); const u = URL.createObjectURL(bl); const a = document.createElement("a"); a.href = u; a.download = r.filename; a.click(); URL.revokeObjectURL(u); toast.success("Full Word exported"); } catch (e: any) { toast.error("Export failed"); } finally { setExportDownloading(null); } }}
-                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-blue-950/60 text-blue-400 hover:bg-blue-900/60 border border-blue-500/20 disabled:opacity-50">
+                  disabled={!!exportDownloading} className="h-8 px-3 text-xs font-mono flex items-center gap-1.5 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/15 border border-blue-500/30 disabled:opacity-50">
                   {exportDownloading === "docx" ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileText className="w-3 h-3" />} Full Word
                 </button>
               </div>
-              <p className="text-[10px] text-blue-400/50 font-mono mt-2">Excel/PDF/Report HTML = HZL report template · Full HTML (8 steps) = every step with charts &amp; diagrams</p>
+              <p className="text-[10px] text-muted-foreground/60 font-mono mt-2">Excel/PDF/Report HTML = HZL report template · Full HTML (8 steps) = every step with charts &amp; diagrams</p>
             </div>
 
             {/* ══ Approval State ══ */}
@@ -5538,8 +5655,8 @@ function CasePage() {
 
             {/* ══ STEP 1 — DATA COLLECTION ══ */}
             {cd && (col.problemStatement || col.equipmentName) && (
-              <div className="bg-secondary/15 border border-blue-500/20 rounded-xl p-5 space-y-4">
-                <SH num={1} title="Data Collection & Validation" color="text-blue-400" />
+              <div className="bg-secondary/20 border border-blue-500/25 rounded-xl p-5 space-y-4">
+                <SH num={1} title="Data Collection & Validation" color="text-blue-500 dark:text-blue-400" />
                 <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
                   {[["Problem Statement", col.problemStatement], ["Effect / Impact", col.effect], ["Equipment Name", col.equipmentName], ["Location / Unit", col.location], ["Operating Conditions", col.operatingConditions], ["Incident Timestamp", col.timestamp], ["Witnessed Symptoms", col.witnessedSymptoms]].filter(([, v]) => v).map(([l, v]) => (
                     <div key={l as string} className={`flex gap-2 ${l === "Problem Statement" || l === "Witnessed Symptoms" ? "col-span-2" : ""}`}>
@@ -5550,14 +5667,22 @@ function CasePage() {
                 </div>
                 {Array.isArray(col.gaps) && col.gaps.length > 0 && (
                   <div>
-                    <p className="text-[10px] font-mono text-amber-400 mb-2">GAPS / UNRESOLVED QUESTIONS</p>
-                    <div className="flex flex-wrap gap-2">{col.gaps.map((g: string, i: number) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-amber-950/40 text-amber-300 border border-amber-500/20">{g}</span>)}</div>
+                    <p className="text-[10px] font-mono text-amber-600 dark:text-amber-400 mb-2 uppercase tracking-wider font-semibold">Gaps / Unresolved Questions</p>
+                    <div className="flex flex-wrap gap-2">
+                      {col.gaps.map((g: string, i: number) => (
+                        <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-amber-500/12 text-amber-700 dark:text-amber-300 border border-amber-500/40 font-medium">{g}</span>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {Array.isArray(col.followUps) && col.followUps.length > 0 && (
                   <div>
-                    <p className="text-[10px] font-mono text-blue-400 mb-2">SUGGESTED FOLLOW-UPS</p>
-                    <div className="flex flex-wrap gap-2">{col.followUps.map((f: string, i: number) => <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-blue-950/40 text-blue-300 border border-blue-500/20">{f}</span>)}</div>
+                    <p className="text-[10px] font-mono text-blue-600 dark:text-blue-400 mb-2 uppercase tracking-wider font-semibold">Suggested Follow-Ups</p>
+                    <div className="flex flex-wrap gap-2">
+                      {col.followUps.map((f: string, i: number) => (
+                        <span key={i} className="text-[11px] px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 border border-blue-500/35 font-medium">{f}</span>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -5565,11 +5690,11 @@ function CasePage() {
 
             {/* ══ STEP 2 — 5-WHY ══ */}
             {cd && (whySteps.length > 0 || Object.values(whyStream1).some(Boolean)) && (
-              <div className="bg-secondary/15 border border-amber-500/20 rounded-xl p-5 space-y-4">
-                <SH num={2} title="5-Why Root Cause Analysis" color="text-amber-400" />
+              <div className="bg-secondary/20 border border-amber-500/25 rounded-xl p-5 space-y-4">
+                <SH num={2} title="5-Why Root Cause Analysis" color="text-amber-600 dark:text-amber-400" />
                 {(rptCore.whyWhyAnalysis?.problem || whySteps[0]?.problemStatement) && (
-                  <div className="bg-amber-950/20 border border-amber-500/15 rounded-lg px-4 py-3">
-                    <span className="text-[10px] font-mono text-amber-400 mr-2">PROBLEM:</span>
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg px-4 py-3">
+                    <span className="text-[10px] font-mono text-amber-600 dark:text-amber-400 mr-2">PROBLEM:</span>
                     <span className="text-sm font-semibold">{rptCore.whyWhyAnalysis?.problem || whySteps[0]?.problemStatement}</span>
                   </div>
                 )}
@@ -5585,7 +5710,7 @@ function CasePage() {
                             {entries.map(([k, v], i) => (
                               <div key={k}>
                                 <div className="flex gap-0">
-                                  <div className={`text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0`}>{k.replace("why", "WHY ")}</div>
+                                  <div className={`text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25 flex items-center w-16 justify-center shrink-0`}>{k.replace("why", "WHY ")}</div>
                                   <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">{v}</div>
                                 </div>
                                 {i < entries.length - 1 && <div className="text-amber-500/40 text-center text-sm py-0.5">↓</div>}
@@ -5601,7 +5726,7 @@ function CasePage() {
                     {whySteps.map((step: any, i: number) => (
                       <div key={i}>
                         <div className="flex gap-0">
-                          <div className="text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-950/40 text-amber-400 border border-amber-500/20 flex items-center w-16 justify-center shrink-0">WHY {step.whyStep || i + 1}</div>
+                          <div className="text-[10px] font-mono font-bold px-3 py-2.5 bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25 flex items-center w-16 justify-center shrink-0">WHY {step.whyStep || i + 1}</div>
                           <div className="flex-1 px-3 py-2.5 bg-background/40 border border-border/30 border-l-0 text-xs">
                             {step.question && <div className="font-semibold mb-1">{step.question}</div>}
                             {(step.selectedAnswer || step.operatorInstruction) && <div className="text-muted-foreground">↳ {step.selectedAnswer || step.operatorInstruction}</div>}
@@ -5617,7 +5742,7 @@ function CasePage() {
 
             {/* ══ STEP 3 — FISHBONE ══ */}
             {cd && Object.keys(fbCats).some(k => Array.isArray(fbCats[k]) && fbCats[k].length) && (
-              <div className="bg-secondary/15 border border-primary/20 rounded-xl p-5 space-y-4">
+              <div className="bg-secondary/20 border border-primary/25 rounded-xl p-5 space-y-4">
                 <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-primary" />
                 <div className="grid grid-cols-3 gap-3">
                   {Object.entries(fbCats).filter(([, v]) => Array.isArray(v) && v.length).map(([key, causes]) => {
@@ -5647,23 +5772,23 @@ function CasePage() {
 
             {/* ══ STEP 4 — FTA ══ */}
             {cd && ftaTree && (
-              <div className="bg-secondary/15 border border-emerald-500/20 rounded-xl p-5 space-y-4">
-                <SH num={4} title="Fault Tree Analysis (FTA)" color="text-emerald-400" />
-                <div className="bg-background/40 border border-border/30 rounded-lg p-4 font-mono text-xs overflow-x-auto">
+              <div className="bg-secondary/20 border border-emerald-500/25 rounded-xl p-5 space-y-4">
+                <SH num={4} title="Fault Tree Analysis (FTA)" color="text-emerald-600 dark:text-emerald-400" />
+                <div className="bg-background/60 border border-border/50 rounded-lg p-4 font-mono text-xs overflow-x-auto">
                   {renderFtaTree(ftaTree)}
                 </div>
                 <div className="flex gap-4 text-[10px] font-mono text-muted-foreground">
-                  <span><span className="text-amber-400">◈</span> Gate (AND/OR/NOT)</span>
-                  <span><span className="text-blue-400">◉</span> Basic event</span>
-                  <span><span className="text-red-400">%</span> &gt;50% = high risk</span>
+                  <span><span className="text-amber-500">◈</span> Gate (AND/OR/NOT)</span>
+                  <span><span className="text-blue-500">◉</span> Basic event</span>
+                  <span><span className="text-red-500">%</span> &gt;50% = high risk</span>
                 </div>
               </div>
             )}
 
             {/* ══ STEP 5 — PARETO ══ */}
             {cd && paretoItems.length > 0 && (
-              <div className="bg-secondary/15 border border-cyan-500/20 rounded-xl p-5 space-y-4">
-                <SH num={5} title="Pareto Analysis" color="text-cyan-400" />
+              <div className="bg-secondary/20 border border-cyan-500/25 rounded-xl p-5 space-y-4">
+                <SH num={5} title="Pareto Analysis" color="text-cyan-600 dark:text-cyan-400" />
                 <div className="space-y-1">
                   <div className="flex gap-3 text-[9px] font-mono text-muted-foreground pb-1 border-b border-border/40">
                     <span className="w-52">Failure Mode</span>
@@ -5697,8 +5822,8 @@ function CasePage() {
 
             {/* ══ STEP 6 — TIMELINE ══ */}
             {cd && tlPhases.length > 0 && (
-              <div className="bg-secondary/15 border border-orange-500/20 rounded-xl p-5 space-y-3">
-                <SH num={6} title="Incident Timeline" color="text-orange-400" />
+              <div className="bg-secondary/20 border border-orange-500/25 rounded-xl p-5 space-y-3">
+                <SH num={6} title="Incident Timeline" color="text-orange-600 dark:text-orange-400" />
                 <div className="space-y-0">
                   {tlPhases.map((phase: any, idx: number) => {
                     const phaseColors = ["border-blue-500", "border-violet-500", "border-amber-500", "border-emerald-500", "border-red-500", "border-cyan-500"];
@@ -5728,8 +5853,8 @@ function CasePage() {
 
             {/* ══ STEP 7 — EQUIPMENT ══ */}
             {cd && (rm.mtbf || rm.mttr || Object.keys(rpn).length > 0) && (
-              <div className="bg-secondary/15 border border-pink-500/20 rounded-xl p-5 space-y-4">
-                <SH num={7} title="Equipment Reliability & RPN Analysis" color="text-pink-400" />
+              <div className="bg-secondary/20 border border-pink-500/25 rounded-xl p-5 space-y-4">
+                <SH num={7} title="Equipment Reliability & RPN Analysis" color="text-pink-600 dark:text-pink-400" />
                 {(rm.mtbf || rm.mttr || rm.availability || rm.failureRate) && (
                   <div className="grid grid-cols-4 gap-3">
                     {([["MTBF", rm.mtbf, "#60A5FA"], ["MTTR", rm.mttr, "#A78BFA"], ["Availability", rm.availability, "#34D399"], ["Failure Rate", rm.failureRate, "#F87171"]] as const).filter(([, v]) => v).map(([label, metric, color]) => (
@@ -5765,8 +5890,8 @@ function CasePage() {
             )}
 
             {/* ══ STEP 8 — ROOT CAUSES & CAPA ══ */}
-            <div className="bg-red-950/20 border border-red-500/25 rounded-xl p-5 space-y-4">
-              <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-400" />
+            <div className="bg-red-500/8 border border-red-500/25 rounded-xl p-5 space-y-4">
+              <SH num={8} title="Root Causes & Corrective Action Plan" color="text-red-600 dark:text-red-400" />
 
               {/* Problem + root cause (locked when approved) */}
               <div className="grid grid-cols-2 gap-4">
@@ -5789,11 +5914,11 @@ function CasePage() {
               {/* Root causes from report agent */}
               {rcs.filter(rc => rc && rc !== editRootCauseText).length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-[10px] font-mono text-red-400">IDENTIFIED ROOT CAUSES</p>
+                  <p className="text-[10px] font-mono text-red-600 dark:text-red-400">IDENTIFIED ROOT CAUSES</p>
                   {rcs.map((rc, i) => (
-                    <div key={i} className="flex gap-2 text-xs p-2 bg-red-950/20 border border-red-500/15 rounded">
-                      <span className="text-red-400 font-bold shrink-0">{i + 1}.</span>
-                      <span>{rc}</span>
+                    <div key={i} className="flex gap-2 text-xs p-2 bg-red-500/8 border border-red-500/20 rounded">
+                      <span className="text-red-600 dark:text-red-400 font-bold shrink-0">{i + 1}.</span>
+                      <span className="text-foreground">{rc}</span>
                     </div>
                   ))}
                 </div>
@@ -6372,6 +6497,18 @@ function CasePage() {
                 isSkipped ||
                 collectorDoneSidebar;
 
+              const agentIcons: Record<string, React.ReactNode> = {
+                data_collector: <Database className="w-3.5 h-3.5 shrink-0" />,
+                timeline: <CalendarClock className="w-3.5 h-3.5 shrink-0" />,
+                equipment: <Wrench className="w-3.5 h-3.5 shrink-0" />,
+                five_why: <HelpCircle className="w-3.5 h-3.5 shrink-0" />,
+                fishbone: <Fish className="w-3.5 h-3.5 shrink-0" />,
+                fault_tree: <GitFork className="w-3.5 h-3.5 shrink-0" />,
+                pareto: <BarChart2 className="w-3.5 h-3.5 shrink-0" />,
+                report: <FileOutput className="w-3.5 h-3.5 shrink-0" />,
+              };
+              const stepIcon = agentIcons[a.key];
+
               return (
                 <button
                   key={a.key}
@@ -6394,25 +6531,53 @@ function CasePage() {
                             : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
                   } ${isMobile || !sidebarCollapsed ? "px-3 py-2" : "p-2 justify-center"}`}
                 >
-                  {(isMobile || !sidebarCollapsed) ? (
+                  {isAgentStepLoading(a.key) ? (
+                    (isMobile || !sidebarCollapsed) ? (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />
+                        <span className="font-mono">{a.shortName}</span>
+                      </div>
+                    ) : (
+                      <div className="w-5 h-5 flex items-center justify-center">
+                        <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                      </div>
+                    )
+                  ) : (isMobile || !sidebarCollapsed) ? (
                     <div className="flex items-center gap-2">
-                      <span className={`mono text-[10px] ${
+                      <span className={`${
                         isSelected
-                          ? "text-primary/70"
+                          ? "text-primary"
                           : isCompleted
-                            ? "text-emerald-400/70"
-                            : "text-muted-foreground/40"
-                      }`}>{a.order}.</span>
+                            ? "text-emerald-400"
+                            : isSkipped
+                              ? "text-muted-foreground/30"
+                              : isClickable
+                                ? "text-foreground/60"
+                                : "text-muted-foreground/20"
+                      }`}>{stepIcon}</span>
                       <span className="font-mono">{a.shortName}</span>
                     </div>
                   ) : (
-                    <div className="w-5 h-5 rounded bg-secondary/50 flex items-center justify-center font-mono text-[10px] font-bold">
-                      {a.order}
+                    <div
+                      title={a.name}
+                      className={`w-5 h-5 flex items-center justify-center ${
+                        isSelected
+                          ? "text-primary"
+                          : isCompleted
+                            ? "text-emerald-400"
+                            : isSkipped
+                              ? "text-muted-foreground/20"
+                              : "text-muted-foreground/40"
+                      }`}
+                    >
+                      {stepIcon}
                     </div>
                   )}
 
                   {(isMobile || !sidebarCollapsed) && (
-                    isCompleted ? (
+                    isAgentStepLoading(a.key) ? (
+                      <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />
+                    ) : isCompleted ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     ) : isSkipped ? (
                       <XCircle className="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -6446,18 +6611,7 @@ function CasePage() {
                   <ArrowRight className="w-4 h-4" />
                 )}
               </Button>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full flex items-center justify-center"
-                onClick={skipAgent}
-                title="Skip to Next"
-              >
-                <SkipForward className="w-3.5 h-3.5" />
-                {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">Skip to Next</span>}
-              </Button>
-            )
+            ) : null
           )}
           <Button
             variant="secondary"
@@ -6470,23 +6624,6 @@ function CasePage() {
             <FileCheck2 className="w-3.5 h-3.5" />
             {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">{caseStatus === "completed" ? "Update Report" : "Save Report"}</span>}
           </Button>
-          <div className="pt-1 border-t border-border/40 w-full">
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full border-primary/40 text-primary hover:text-primary/90 hover:bg-primary/10 hover:border-primary/60 font-semibold flex items-center justify-center"
-              onClick={() => { setShowAutoModal(true); }}
-              disabled={autoMut.isPending}
-              title="Run Full Analysis"
-            >
-              {autoMut.isPending ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Zap className="w-3.5 h-3.5" />
-              )}
-              {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">Run Full Analysis</span>}
-            </Button>
-          </div>
         </div>
       </div>
     );
@@ -6738,10 +6875,27 @@ function CasePage() {
       {/* Agent Progress Bar */}
       <div className="panel p-3">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs text-muted-foreground mono uppercase">
-            RCA Analysis Pipeline
-          </span>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground mono uppercase">
+              RCA Analysis Pipeline
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowAutoModal(true)}
+              disabled={autoMut.isPending}
+              className="h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border-primary/40 text-primary bg-primary/5 hover:bg-primary hover:text-white hover:border-primary transition-colors"
+              title="Run Full AI Analysis"
+            >
+              {autoMut.isPending ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Zap className="w-3 h-3 animate-pulse" />
+              )}
+              <span>Run Full AI Analysis</span>
+            </Button>
+          </div>
+          <div className="flex items-start gap-1.5">
             <Badge variant="outline" className="text-xs mono">
               {completedAgents.size + skippedAgents.size}/{AGENTS.length} steps
             </Badge>
@@ -6761,7 +6915,7 @@ function CasePage() {
               title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
             >
               {isFullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
-              <span className="hidden sm:inline">{isFullscreen ? "Exit" : "Fullscreen"}</span>
+              <span className="hidden xl:inline">{isFullscreen ? "Exit" : "Fullscreen"}</span>
             </button>
             {/* History button */}
             <button
@@ -6770,7 +6924,7 @@ function CasePage() {
               title="Edit history"
             >
               <History className="w-3 h-3" />
-              <span className="hidden sm:inline">History</span>
+              <span className="hidden xl:inline">History</span>
             </button>
             {/* Collaborators button */}
             <button
@@ -6779,31 +6933,47 @@ function CasePage() {
               title="Manage collaborators"
             >
               <Users className="w-3 h-3" />
-              <span className="hidden sm:inline">Collaborators</span>
+              <span className="hidden xl:inline">Collaborators</span>
               {(caseQ.data?.collaborators?.length ?? 0) > 0 && (
                 <span className="ml-0.5 bg-primary/20 text-primary rounded-full px-1 text-[9px]">
                   {caseQ.data!.collaborators!.length}
                 </span>
               )}
             </button>
-            {/* Share/Public button */}
-            <button
-              onClick={() => {
-                if (caseQ.data?.case.status !== "completed") {
-                  toast.warning("Complete the RCA first to make it public");
-                  return;
-                }
-                setShowSharePopover(true);
-              }}
-              className={`h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border transition-colors ${caseQ.data?.case.is_public
-                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
-                  : "border-border/60 bg-secondary/30 text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-                }`}
-              title={caseQ.data?.case.status !== "completed" ? "Complete the RCA first" : "Share publicly"}
-            >
-              <Globe className="w-3 h-3" />
-              <span className="hidden sm:inline">{caseQ.data?.case.is_public ? "Public" : "Share"}</span>
-            </button>
+            {/* Share/Public button and auto-save status */}
+            <div className="flex flex-col items-end gap-1">
+              <button
+                onClick={() => {
+                  if (caseQ.data?.case.status !== "completed") {
+                    toast.warning("Complete the RCA first to make it public");
+                    return;
+                  }
+                  setShowSharePopover(true);
+                }}
+                className={`h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border transition-colors ${caseQ.data?.case.is_public
+                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+                    : "border-border/60 bg-secondary/30 text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                  }`}
+                title={caseQ.data?.case.status !== "completed" ? "Complete the RCA first" : "Share publicly"}
+              >
+                <Globe className="w-3 h-3" />
+                <span className="hidden xl:inline">{caseQ.data?.case.is_public ? "Public" : "Share"}</span>
+              </button>
+              <span className="text-[10px] text-muted-foreground/60 font-mono mt-0.5 whitespace-nowrap">
+                {saveStatus === "saving" ? (
+                  <span className="flex items-center gap-1">
+                    <Loader2 className="w-2.5 h-2.5 animate-spin text-primary" />
+                    Saving changes...
+                  </span>
+                ) : saveStatus === "error" ? (
+                  <span className="text-red-400 font-semibold">Save failed</span>
+                ) : lastSavedTime ? (
+                  <span>Last saved on {lastSavedTime.toLocaleTimeString()}</span>
+                ) : (
+                  <span>All changes saved</span>
+                )}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
@@ -6835,13 +7005,20 @@ function CasePage() {
                           : "bg-secondary border border-border text-muted-foreground"
                     }`}
                 >
-                  {isComplete ? (
-                    <CheckCircle2 className="w-3 h-3" />
-                  ) : isSkipped ? (
-                    <XCircle className="w-3 h-3" />
-                  ) : (
-                    <Circle className="w-3 h-3" />
-                  )}
+                  {(() => {
+                    const pillIcons: Record<string, React.ReactNode> = {
+                      data_collector: <Database className="w-3 h-3 shrink-0" />,
+                      timeline: <CalendarClock className="w-3 h-3 shrink-0" />,
+                      equipment: <Wrench className="w-3 h-3 shrink-0" />,
+                      five_why: <HelpCircle className="w-3 h-3 shrink-0" />,
+                      fishbone: <Fish className="w-3 h-3 shrink-0" />,
+                      fault_tree: <GitFork className="w-3 h-3 shrink-0" />,
+                      pareto: <BarChart2 className="w-3 h-3 shrink-0" />,
+                      report: <FileOutput className="w-3 h-3 shrink-0" />,
+                    };
+                    if (isAgentStepLoading(agent.key)) return <Loader2 className="w-3 h-3 text-primary animate-spin shrink-0" />;
+                    return pillIcons[agent.key] ?? <Circle className="w-3 h-3 shrink-0" />;
+                  })()}
                   <span className="hidden sm:inline">{agent.shortName}</span>
                 </button>
                 {idx < AGENTS.length - 1 && (
@@ -6886,8 +7063,57 @@ function CasePage() {
           <div className="panel flex flex-col overflow-hidden">
             <div className="panel-header flex items-center justify-between">
               <span className="flex items-center gap-2">
-                // {caseQ.data?.case.title ?? "loading"} — {currentAgent?.name ?? "select agent"}
+                {/* Per-agent icon */}
+                {currentAgent && (() => {
+                  const headerIcons: Record<string, React.ReactNode> = {
+                    data_collector: <Database className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    timeline: <CalendarClock className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    equipment: <Wrench className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    five_why: <HelpCircle className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    fishbone: <Fish className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    fault_tree: <GitFork className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    pareto: <BarChart2 className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                    report: <FileOutput className="w-3.5 h-3.5 text-primary/70 shrink-0" />,
+                  };
+                  return headerIcons[currentAgent.key] ?? null;
+                })()}
+                <span className="text-muted-foreground">{caseQ.data?.case.title ?? "loading"}</span>
+                <span className="text-muted-foreground/40">—</span>
+                <span className="text-primary font-semibold uppercase">{currentAgent?.name ?? "select agent"}</span>
+
+                {/* Skip Step — inline, next to title */}
+                {currentAgent && agentStep < AGENTS.length - 1 &&
+                  !(completedAgents.has(currentAgent.key) || (currentAgent.key === "data_collector" && editLocked)) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={skipAgent}
+                      className="h-6 text-[10px] font-mono text-muted-foreground hover:text-amber-400 hover:bg-amber-500/10 border border-border/50 flex items-center gap-1 px-2 ml-1"
+                      title="Skip this agent step"
+                    >
+                      <SkipForward className="w-3 h-3 text-amber-500" />
+                      <span>Skip Step</span>
+                    </Button>
+                  )
+                }
+
+                {/* Next Step — inline, next to Skip Step */}
+                {currentAgent && agentStep < AGENTS.length - 1 &&
+                  (completedAgents.has(currentAgent.key) || (currentAgent.key === "data_collector" && editLocked)) && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => goToAgent(agentStep + 1)}
+                      className="h-6 text-[10px] font-mono text-emerald-500 hover:text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1 px-2 ml-1"
+                      title={`Go to Next Step: ${AGENTS[agentStep + 1].shortName}`}
+                    >
+                      <span>Next Step</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </Button>
+                  )
+                }
               </span>
+
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
@@ -6906,7 +7132,7 @@ function CasePage() {
                 <Button
                   variant={showChat ? "secondary" : "outline"}
                   size="sm"
-                  onClick={() => setShowChat(!showChat)}
+                  onClick={toggleChatConsole}
                   className="h-8 text-xs font-mono"
                 >
                   <MessageSquare className="w-3.5 h-3.5 mr-1.5 text-primary" />

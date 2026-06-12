@@ -385,6 +385,14 @@
   outline: none !important;
 }
 
+.borderless-textarea,
+.borderless-textarea:focus {
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
 /* Light mode fixes: Tailwind fixed-shade colors like emerald-400, amber-500 look great in
    dark mode but have poor contrast on light backgrounds. Override the most common offenders. */
 .light {

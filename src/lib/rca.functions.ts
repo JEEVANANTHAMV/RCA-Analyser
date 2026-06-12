@@ -1260,7 +1260,42 @@ export const listMyCases = createServerFn({ method: "GET" })
     const all = [...owned, ...collaborated].sort(
       (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
     );
-    return { cases: all };
+
+    const casesWithProgress = all.map((c) => {
+      const convos = db
+        .prepare("SELECT id, agent_key FROM conversations WHERE rca_case_id = ?")
+        .all(c.id) as { id: string; agent_key: string }[];
+      
+      const completedAgents = new Set<string>();
+      for (const conv of convos) {
+        const msg = db
+          .prepare("SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?")
+          .get(conv.id) as { cnt: number };
+        if (msg.cnt > 0) {
+          completedAgents.add(conv.agent_key);
+        }
+      }
+
+      let editLocked = false;
+      if (c.incident_data) {
+        try {
+          const parsed = JSON.parse(c.incident_data);
+          if (parsed.locked) {
+            editLocked = true;
+          }
+        } catch {}
+      }
+      if (editLocked) {
+        completedAgents.add("data_collector");
+      }
+
+      return {
+        ...c,
+        completed_agents: Array.from(completedAgents),
+      };
+    });
+
+    return { cases: casesWithProgress };
   });
 
 export const deleteCase = createServerFn({ method: "POST" })
