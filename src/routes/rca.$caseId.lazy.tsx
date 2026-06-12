@@ -92,6 +92,7 @@ export const Route = createLazyFileRoute("/rca/$caseId")({
   ),
 });
 
+
 function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
   for (let i = arr.length - 1; i >= 0; i--) {
     if (predicate(arr[i])) return i;
@@ -333,6 +334,7 @@ function CasePage() {
     sparePartCost: "", serviceCost: "", manpowerCost: "", productionLoss: "", totalBreakdownCost: "",
     lastPMDate: "", cbmDate: "", cbmStatus: "",
     lastFailureDate: "", lastFailureRootCause: "",
+    customAnswers: {} as Record<string, string>,
   });
   const [capaActions, setCapaActions] = useState<any[]>([
     { id: "capa-1", desc: "Check safety lock constraints and verify manual controls are overridden.", owner: "Jane Doe (Maint)", date: "2026-05-25", status: "In Progress" },
@@ -1995,8 +1997,8 @@ function CasePage() {
                   return (
                     <div key={idx} className="relative group">
                       <div className={`absolute -left-[31px] top-1.5 w-4 h-4 rounded-full border-2 bg-background flex items-center justify-center transition-all ${isCurrent
-                          ? "border-primary scale-110 shadow-[0_0_8px_rgba(251,191,36,0.5)]"
-                          : "border-emerald-500 bg-emerald-500/10"
+                        ? "border-primary scale-110 shadow-[0_0_8px_rgba(251,191,36,0.5)]"
+                        : "border-emerald-500 bg-emerald-500/10"
                         }`}>
                         {isCurrent ? (
                           <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
@@ -2006,8 +2008,8 @@ function CasePage() {
                       </div>
 
                       <div className={`p-4 rounded-lg border transition-all duration-300 ${isCurrent
-                          ? "bg-secondary/40 border-primary/40 shadow-sm"
-                          : "bg-secondary/20 border-border/40"
+                        ? "bg-secondary/40 border-primary/40 shadow-sm"
+                        : "bg-secondary/20 border-border/40"
                         }`}>
                         <div className="flex items-center gap-2 mb-2">
                           <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${isCurrent ? "bg-primary/20 text-primary" : "bg-emerald-500/10 text-emerald-400"
@@ -2200,8 +2202,8 @@ function CasePage() {
                                             }
                                           }}
                                           className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected
-                                              ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
-                                              : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
+                                            ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
+                                            : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                             }`}
                                         >
                                           {idx === 0 ? (
@@ -2240,8 +2242,8 @@ function CasePage() {
                                         }
                                       }}
                                       className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${(idx === 0 ? selectedCauseIds.includes("custom") : selectedCauseId === "custom")
-                                          ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
-                                          : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
+                                        ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
+                                        : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                         }`}
                                     >
                                       {idx === 0 ? (
@@ -2699,8 +2701,8 @@ function CasePage() {
                                         {rc.subCauses?.length > 0 && <p className="text-[10px] text-muted-foreground">Sub-causes: {rc.subCauses.join(", ")}</p>}
                                       </div>
                                       <Badge variant="outline" className={`text-[9px] font-mono uppercase ${rc.status === "confirmed" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
-                                          rc.status === "refuted" ? "bg-red-500/10 text-red-400 border-red-500/20" :
-                                            "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                                        rc.status === "refuted" ? "bg-red-500/10 text-red-400 border-red-500/20" :
+                                          "bg-amber-500/10 text-amber-400 border-amber-500/20"
                                         }`}>{rc.status}</Badge>
                                     </div>
                                   ))}
@@ -3031,8 +3033,8 @@ function CasePage() {
                                   <div className="flex items-start justify-between gap-3 mb-2">
                                     <p className="font-semibold text-sm text-foreground">{rc.cause}</p>
                                     <Badge className={`text-xs font-mono px-2.5 py-0.5 ${rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                        rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                          "bg-amber-500/20 text-amber-400 border-amber-500/40"
+                                      rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                        "bg-amber-500/20 text-amber-400 border-amber-500/40"
                                       }`}>
                                       {rc.status}
                                     </Badge>
@@ -3124,8 +3126,8 @@ function CasePage() {
                                         toast.success(`Cause ${e.target.value}`);
                                       }}
                                       className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${rc.status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                          rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                            "bg-amber-500/20 text-amber-400 border-amber-500/20"
+                                        rc.status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                          "bg-amber-500/20 text-amber-400 border-amber-500/20"
                                         }`}
                                     >
                                       <option value="pending">⏳ Pending</option>
@@ -3167,10 +3169,10 @@ function CasePage() {
                                       toast.success("Cause confirmed ✓");
                                     }}
                                     className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${rc.status === "confirmed"
-                                        ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
-                                        : rc.status === "refuted"
-                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                          : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
+                                      ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                                      : rc.status === "refuted"
+                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                        : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
                                       }`}
                                     disabled={rc.status === "refuted"}
                                   >
@@ -3188,10 +3190,10 @@ function CasePage() {
                                       toast.info("Cause refuted");
                                     }}
                                     className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${rc.status === "refuted"
-                                        ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
-                                        : rc.status === "confirmed"
-                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                          : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
+                                      ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
+                                      : rc.status === "confirmed"
+                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                        : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
                                       }`}
                                     disabled={rc.status === "confirmed"}
                                   >
@@ -3322,8 +3324,8 @@ function CasePage() {
                                 onClick={() => setActiveEditCat(cat)}
                                 type="button"
                                 className={`text-xs px-3 py-1 font-mono rounded-lg border transition-all ${isSelected
-                                    ? "bg-primary/20 text-primary border-primary/40 font-bold"
-                                    : "bg-transparent text-muted-foreground border-border hover:bg-secondary"
+                                  ? "bg-primary/20 text-primary border-primary/40 font-bold"
+                                  : "bg-transparent text-muted-foreground border-border hover:bg-secondary"
                                   }`}
                               >
                                 {cat.toUpperCase()}
@@ -3392,8 +3394,8 @@ function CasePage() {
                                       value={status}
                                       onChange={(e) => updateCauseValue("status", e.target.value)}
                                       className={`text-xs font-mono uppercase p-2 rounded-lg border w-[140px] cursor-pointer ${status === "confirmed" ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" :
-                                          status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
-                                            "bg-amber-500/20 text-amber-400 border-amber-500/20"
+                                        status === "refuted" ? "bg-red-500/20 text-red-400 border-red-500/40" :
+                                          "bg-amber-500/20 text-amber-400 border-amber-500/20"
                                         }`}
                                     >
                                       <option value="pending">⏳ Pending</option>
@@ -3409,10 +3411,10 @@ function CasePage() {
                                     onClick={() => updateCauseValue("status", "confirmed")}
                                     type="button"
                                     className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${status === "confirmed"
-                                        ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
-                                        : status === "refuted"
-                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                          : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
+                                      ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700"
+                                      : status === "refuted"
+                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                        : "bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/25"
                                       }`}
                                     disabled={status === "refuted"}
                                   >
@@ -3422,10 +3424,10 @@ function CasePage() {
                                     onClick={() => updateCauseValue("status", "refuted")}
                                     type="button"
                                     className={`text-sm px-4 py-2 rounded-lg transition-all font-mono border ${status === "refuted"
-                                        ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
-                                        : status === "confirmed"
-                                          ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
-                                          : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
+                                      ? "bg-rose-600 text-white border-rose-600 hover:bg-rose-700"
+                                      : status === "confirmed"
+                                        ? "bg-transparent text-muted-foreground/40 border-border/40 opacity-40 cursor-not-allowed"
+                                        : "bg-red-500/15 text-red-400 border-red-500/30 hover:bg-red-500/25"
                                       }`}
                                     disabled={status === "confirmed"}
                                   >
@@ -4096,8 +4098,8 @@ function CasePage() {
                         <span className="text-primary font-bold font-mono">{cs.cutSetId || `MCS-${i + 1}`}</span>
                         {cs.criticality && (
                           <Badge className={`text-[9px] px-1.5 py-0 font-mono ${cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
-                              cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
-                                "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                            cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
+                              "bg-blue-500/20 text-blue-400 border-blue-500/30"
                             }`}>{cs.criticality.toUpperCase()}</Badge>
                         )}
                         {cs.probability !== undefined && (
@@ -4670,8 +4672,8 @@ function CasePage() {
                               const sigBadge = e.significance === "critical"
                                 ? "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
                                 : e.significance === "high"
-                                ? "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"
-                                : "bg-secondary text-muted-foreground";
+                                  ? "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"
+                                  : "bg-secondary text-muted-foreground";
                               return (
                                 <div key={i} className="text-xs bg-secondary/40 border border-border/30 rounded-lg p-2.5 space-y-1">
                                   <div className="flex items-center gap-2 flex-wrap">
@@ -5146,10 +5148,10 @@ function CasePage() {
                       <div className="flex justify-between items-center">
                         <span className="font-semibold text-xs text-foreground truncate w-[160px]">{item.name}</span>
                         <Badge className={`text-[8px] font-mono ${item.health === "NOMINAL"
-                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
-                            : item.health.includes("FAULT")
-                              ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
-                              : "bg-amber-500/10 text-amber-400 border-amber-500/30"
+                          ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                          : item.health.includes("FAULT")
+                            ? "bg-rose-500/10 text-rose-400 border-rose-500/30"
+                            : "bg-amber-500/10 text-amber-400 border-amber-500/30"
                           }`}>
                           {item.health}
                         </Badge>
@@ -5399,25 +5401,77 @@ function CasePage() {
             </div>
 
             {/* ══ Pending Questions from Agent ══ */}
-            {Array.isArray(reportPayload?.pendingQuestions) && reportPayload.pendingQuestions.length > 0 && !reportApproved && (
-              <div className="bg-amber-500/8 border border-amber-500/30 rounded-xl p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
-                  <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">Report has {reportPayload.pendingQuestions.length} missing field{reportPayload.pendingQuestions.length > 1 ? "s" : ""} — click "Sign & Approve" to fill them before locking</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  {reportPayload.pendingQuestions.map((q: any, i: number) => (
-                    <div key={i} className="flex gap-2 p-2 bg-amber-500/5 border border-amber-500/20 rounded-lg text-xs">
-                      <span className="text-amber-500 font-bold shrink-0">?</span>
-                      <div>
-                        <p className="font-semibold text-foreground">{q.label}</p>
-                        {q.hint && <p className="text-muted-foreground text-[10px] mt-0.5">{q.hint}</p>}
-                      </div>
+            {Array.isArray(reportPayload?.pendingQuestions) && reportPayload.pendingQuestions.length > 0 && !reportApproved && (() => {
+              // Map known pending-question field names to approvalForm keys so inline answers
+              // pre-fill the Sign & Approve modal automatically.
+              const FIELD_MAP: Record<string, keyof typeof approvalForm> = {
+                zzNotificationNumber: "zzNotification", z2NotificationNumber: "zzNotification",
+                zrNumber: "zrNumber",
+                sparePartCost: "sparePartCost", serviceCost: "serviceCost",
+                manpowerCost: "manpowerCost", productionLoss: "productionLoss",
+                totalBreakdownCost: "totalBreakdownCost",
+                "costOfFailure.sparePartCost": "sparePartCost", "costOfFailure.serviceCost": "serviceCost",
+                "costOfFailure.manpowerCost": "manpowerCost", "costOfFailure.productionLoss": "productionLoss",
+                "costOfFailure.totalBreakdownCost": "totalBreakdownCost",
+                lastPMDate: "lastPMDate", "maintenanceHistory.lastPMDate": "lastPMDate",
+                cbmDate: "cbmDate", "maintenanceHistory.cbmDate": "cbmDate",
+                cbmStatus: "cbmStatus", "maintenanceHistory.cbmStatus": "cbmStatus",
+                lastFailureDate: "lastFailureDate", "lastFailure.date": "lastFailureDate",
+                lastFailureRootCause: "lastFailureRootCause", "lastFailure.rootCause": "lastFailureRootCause",
+              };
+              return (
+                <div className="bg-amber-500/8 border border-amber-500/30 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                      <p className="text-sm font-semibold text-amber-600 dark:text-amber-400">
+                        {reportPayload.pendingQuestions.length} field{reportPayload.pendingQuestions.length > 1 ? "s" : ""} need your input before approving
+                      </p>
                     </div>
-                  ))}
+                    <button onClick={() => setShowApprovalModal(true)}
+                      className="text-[10px] font-mono text-amber-400 hover:text-amber-300 underline shrink-0">
+                      Open full form ↗
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {reportPayload.pendingQuestions.map((q: any, i: number) => {
+                      const formKey = FIELD_MAP[q.field];
+                      const isTeamMembers = q.field === "teamMembers";
+                      return (
+                        <div key={i} className="p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-xs space-y-1.5">
+                          <div className="flex items-start gap-1.5">
+                            <span className="text-amber-500 font-bold shrink-0 mt-0.5">?</span>
+                            <div>
+                              <p className="font-semibold text-foreground">{q.label}</p>
+                              {q.hint && <p className="text-muted-foreground text-[10px]">{q.hint}</p>}
+                            </div>
+                          </div>
+                          {isTeamMembers ? (
+                            <p className="text-[10px] text-amber-500/70 italic pl-4">Fill team members in the Sign & Approve form →</p>
+                          ) : formKey ? (
+                            <input
+                              type="text"
+                              value={approvalForm[formKey] as string}
+                              onChange={e => setApprovalForm(f => ({ ...f, [formKey]: e.target.value }))}
+                              placeholder={`Enter ${q.label}…`}
+                              className="w-full text-xs p-1.5 bg-background border border-amber-500/40 rounded focus:border-amber-400 focus:outline-none"
+                            />
+                          ) : (
+                            <input
+                              type="text"
+                              value={approvalForm.customAnswers[q.field] || ""}
+                              onChange={e => setApprovalForm(f => ({ ...f, customAnswers: { ...f.customAnswers, [q.field]: e.target.value } }))}
+                              placeholder={`Enter ${q.label}…`}
+                              className="w-full text-xs p-1.5 bg-background border border-amber-500/40 rounded focus:border-amber-400 focus:outline-none"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* ══════════════════════════════════════════════════════════ */}
             {/* Loading skeleton while fetching combined data             */}
@@ -5668,14 +5722,14 @@ function CasePage() {
                   {reportApproved
                     ? <p className="text-sm font-semibold p-2 bg-secondary/20 border border-border/40 rounded text-foreground">{editProblemStatement || "—"}</p>
                     : <input type="text" value={editProblemStatement} onChange={e => setEditProblemStatement(e.target.value)}
-                        className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground" />}
+                      className="w-full text-sm font-semibold p-2 bg-background border border-border rounded text-foreground" />}
                 </div>
                 <div>
                   <label className="text-[10px] text-muted-foreground font-mono block mb-1">CONFIRMED ROOT CAUSE</label>
                   {reportApproved
                     ? <p className="text-xs font-mono p-2 bg-secondary/20 border border-border/40 rounded text-foreground whitespace-pre-wrap">{editRootCauseText || "—"}</p>
                     : <Textarea value={editRootCauseText} onChange={e => setEditRootCauseText(e.target.value)} autoResize
-                        className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground" />}
+                      className="w-full text-xs font-mono p-2 bg-background border border-border rounded text-foreground" />}
                 </div>
               </div>
 
@@ -5742,8 +5796,8 @@ function CasePage() {
                             ? <p className="mt-0.5 font-semibold text-foreground">{val || "—"}</p>
                             : (field === "type" || field === "status")
                               ? <select value={val} onChange={e => updateCapa(act.id, field, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground text-[9px]">
-                                  {(field === "type" ? ["CA", "PA"] : ["Pending", "In Progress", "Completed"]).map(o => <option key={o} value={o}>{o}</option>)}
-                                </select>
+                                {(field === "type" ? ["CA", "PA"] : ["Pending", "In Progress", "Completed"]).map(o => <option key={o} value={o}>{o}</option>)}
+                              </select>
                               : <input type="text" value={val} onChange={e => updateCapa(act.id, field, e.target.value)} className="w-full p-0.5 mt-0.5 bg-background border border-border rounded text-foreground" />
                           }
                         </div>
@@ -5904,6 +5958,42 @@ function CasePage() {
                         </div>
                       </div>
                     </div>
+
+                    {/* Dynamic section for any pending questions not covered by hardcoded fields */}
+                    {(() => {
+                      const COVERED = new Set([
+                        "zzNotificationNumber", "z2NotificationNumber", "zrNumber",
+                        "teamMembers",
+                        "sparePartCost", "serviceCost", "manpowerCost", "productionLoss", "totalBreakdownCost",
+                        "costOfFailure.sparePartCost", "costOfFailure.serviceCost", "costOfFailure.manpowerCost",
+                        "costOfFailure.productionLoss", "costOfFailure.totalBreakdownCost",
+                        "lastPMDate", "maintenanceHistory.lastPMDate",
+                        "cbmDate", "maintenanceHistory.cbmDate",
+                        "cbmStatus", "maintenanceHistory.cbmStatus",
+                        "lastFailureDate", "lastFailure.date",
+                        "lastFailureRootCause", "lastFailure.rootCause",
+                      ]);
+                      const extra = (reportPayload?.pendingQuestions ?? []).filter((q: any) => !COVERED.has(q.field));
+                      if (!extra.length) return null;
+                      return (
+                        <div>
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Additional Missing Fields</h4>
+                          <div className="grid grid-cols-2 gap-3">
+                            {extra.map((q: any) => (
+                              <div key={q.field}>
+                                <label className="text-[10px] font-mono text-muted-foreground block mb-1">{q.label}</label>
+                                {q.hint && <p className="text-[10px] text-muted-foreground/70 mb-1">{q.hint}</p>}
+                                <input type="text"
+                                  value={approvalForm.customAnswers[q.field] || ""}
+                                  onChange={e => setApprovalForm(f => ({ ...f, customAnswers: { ...f.customAnswers, [q.field]: e.target.value } }))}
+                                  placeholder={`Enter ${q.label}…`}
+                                  className="w-full text-sm p-2 bg-background border border-border rounded-lg focus:border-primary/50 focus:outline-none" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Modal Footer */}
@@ -5913,7 +6003,7 @@ function CasePage() {
                       disabled={updateAgentMsgMut.isPending}
                       onClick={() => {
                         const af = approvalForm;
-                        const mergedReport = {
+                        const mergedReport: any = {
                           ...(parsedData || {}),
                           approved: true,
                           header: {
@@ -5944,6 +6034,17 @@ function CasePage() {
                             ...(af.lastFailureRootCause ? { rootCause: af.lastFailureRootCause } : {}),
                           },
                         };
+                        // Apply any custom answers (for fields not covered by hardcoded sections above)
+                        for (const [path, value] of Object.entries(af.customAnswers)) {
+                          if (!value?.trim()) continue;
+                          const parts = path.split(".");
+                          let node: any = mergedReport;
+                          for (let pi = 0; pi < parts.length - 1; pi++) {
+                            if (!node[parts[pi]] || typeof node[parts[pi]] !== "object") node[parts[pi]] = {};
+                            node = node[parts[pi]];
+                          }
+                          node[parts[parts.length - 1]] = value;
+                        }
                         updateAgentMsgMut.mutate(mergedReport, {
                           onSuccess: () => {
                             setReportApproved(true);
@@ -6052,14 +6153,14 @@ function CasePage() {
                 <div
                   key={agent.key}
                   className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs transition-all ${status === "complete"
-                      ? "bg-emerald-500/5 border-emerald-500/20"
-                      : status === "running"
-                        ? "bg-violet-500/5 border-violet-500/30"
-                        : status === "skipped"
-                          ? "bg-muted/20 border-border/30 opacity-60"
-                          : status === "error"
-                            ? "bg-red-500/5 border-red-500/30"
-                            : "bg-transparent border-transparent opacity-30"
+                    ? "bg-emerald-500/5 border-emerald-500/20"
+                    : status === "running"
+                      ? "bg-violet-500/5 border-violet-500/30"
+                      : status === "skipped"
+                        ? "bg-muted/20 border-border/30 opacity-60"
+                        : status === "error"
+                          ? "bg-red-500/5 border-red-500/30"
+                          : "bg-transparent border-transparent opacity-30"
                     }`}
                 >
                   <div className="mt-0.5 shrink-0">
@@ -6196,9 +6297,8 @@ function CasePage() {
                   }
                 }}
                 disabled={togglingPublic}
-                className={`relative w-11 h-6 rounded-full transition-colors flex items-center ${
-                  caseQ.data?.case.is_public ? "bg-emerald-500" : "bg-secondary border border-border"
-                }`}
+                className={`relative w-11 h-6 rounded-full transition-colors flex items-center ${caseQ.data?.case.is_public ? "bg-emerald-500" : "bg-secondary border border-border"
+                  }`}
               >
                 {togglingPublic ? (
                   <Loader2 className="w-3 h-3 animate-spin mx-auto" />
@@ -6438,11 +6538,10 @@ function CasePage() {
                 }
                 setShowSharePopover(true);
               }}
-              className={`h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border transition-colors ${
-                caseQ.data?.case.is_public
+              className={`h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border transition-colors ${caseQ.data?.case.is_public
                   ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
                   : "border-border/60 bg-secondary/30 text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-              }`}
+                }`}
               title={caseQ.data?.case.status !== "completed" ? "Complete the RCA first" : "Share publicly"}
             >
               <Globe className="w-3 h-3" />
@@ -6470,14 +6569,14 @@ function CasePage() {
                   onClick={() => isClickable && goToAgent(idx)}
                   disabled={!isClickable}
                   className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs mono transition-all duration-300 ${isCurrent
-                      ? "bg-primary/20 border-2 border-primary text-primary shadow-[0_0_15px_rgba(251,191,36,0.3)] scale-105"
-                      : isComplete
-                        ? "bg-[color:var(--signal-ok)]/15 border border-[color:var(--signal-ok)]/40 text-[color:var(--signal-ok)]"
-                        : isSkipped
-                          ? "bg-muted border border-border text-muted-foreground line-through"
-                          : isFuture
-                            ? "bg-secondary/50 border border-border text-muted-foreground opacity-50"
-                            : "bg-secondary border border-border text-muted-foreground"
+                    ? "bg-primary/20 border-2 border-primary text-primary shadow-[0_0_15px_rgba(251,191,36,0.3)] scale-105"
+                    : isComplete
+                      ? "bg-[color:var(--signal-ok)]/15 border border-[color:var(--signal-ok)]/40 text-[color:var(--signal-ok)]"
+                      : isSkipped
+                        ? "bg-muted border border-border text-muted-foreground line-through"
+                        : isFuture
+                          ? "bg-secondary/50 border border-border text-muted-foreground opacity-50"
+                          : "bg-secondary border border-border text-muted-foreground"
                     }`}
                 >
                   {isComplete ? (
@@ -6492,8 +6591,8 @@ function CasePage() {
                 {idx < AGENTS.length - 1 && (
                   <ArrowRight
                     className={`w-3 h-3 mx-2 shrink-0 transition-colors ${isComplete || idx < agentStep
-                        ? "text-[color:var(--signal-ok)]/50"
-                        : "text-muted-foreground/30"
+                      ? "text-[color:var(--signal-ok)]/50"
+                      : "text-muted-foreground/30"
                       }`}
                   />
                 )}
@@ -6542,22 +6641,22 @@ function CasePage() {
                     disabled={!isClickable}
                     onClick={() => isClickable && goToAgent(idx)}
                     className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-all flex items-center justify-between border ${isSelected
-                        ? "bg-primary/10 border-primary/40 text-primary font-bold shadow-[0_0_10px_rgba(251,191,36,0.15)]"
-                        : isCompleted
-                          ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10"
-                          : isSkipped
-                            ? "bg-muted/30 border-transparent text-muted-foreground/50 line-through hover:bg-secondary/40"
-                            : isClickable
-                              ? "bg-transparent border-transparent text-foreground hover:bg-secondary"
-                              : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
+                      ? "bg-primary/10 border-primary/40 text-primary font-bold shadow-[0_0_10px_rgba(251,191,36,0.15)]"
+                      : isCompleted
+                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10"
+                        : isSkipped
+                          ? "bg-muted/30 border-transparent text-muted-foreground/50 line-through hover:bg-secondary/40"
+                          : isClickable
+                            ? "bg-transparent border-transparent text-foreground hover:bg-secondary"
+                            : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
                       }`}
                   >
                     <div className="flex items-center gap-2">
                       <span className={`mono text-[10px] ${isSelected
-                          ? "text-primary/70"
-                          : isCompleted
-                            ? "text-emerald-400/70"
-                            : "text-muted-foreground/40"
+                        ? "text-primary/70"
+                        : isCompleted
+                          ? "text-emerald-400/70"
+                          : "text-muted-foreground/40"
                         }`}>{a.order}.</span>
                       <span className="font-mono">{a.shortName}</span>
                     </div>
@@ -6735,16 +6834,16 @@ function CasePage() {
                     >
                       <div
                         className={`max-w-[85%] rounded-xl px-4 py-3 transition-all duration-300 ${m.role === "user"
-                            ? "bg-primary/15 border border-primary/30 shadow-[0_0_20px_rgba(251,191,36,0.1)]"
-                            : "bg-secondary/80 border border-border shadow-lg"
+                          ? "bg-primary/15 border border-primary/30 shadow-[0_0_20px_rgba(251,191,36,0.1)]"
+                          : "bg-secondary/80 border border-border shadow-lg"
                           }`}
                       >
                         <div className="flex items-center gap-2 mb-2">
                           <Badge
                             variant="outline"
                             className={`text-[10px] mono uppercase ${m.role === "user"
-                                ? "bg-primary/20 text-primary border-primary/40"
-                                : "bg-accent/20 text-accent border-accent/40"
+                              ? "bg-primary/20 text-primary border-primary/40"
+                              : "bg-accent/20 text-accent border-accent/40"
                               }`}
                           >
                             {m.role === "user" ? "Operator" : currentAgent?.shortName}
@@ -6945,8 +7044,8 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
                   <span className="font-medium text-foreground">{cause.description}</span>
                   {cause.likelihood && (
                     <Badge variant="outline" className={`text-[8px] px-1 ml-auto shrink-0 font-mono ${cause.likelihood.toLowerCase() === "high"
-                        ? "bg-red-500/10 text-red-400 border-red-500/20"
-                        : "bg-amber-500/10 text-amber-400 border-amber-500/20"
+                      ? "bg-red-500/10 text-red-400 border-red-500/20"
+                      : "bg-amber-500/10 text-amber-400 border-amber-500/20"
                       }`}>
                       {cause.likelihood}
                     </Badge>
@@ -7058,10 +7157,10 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
                       <Badge
                         variant="outline"
                         className={`ml-2 text-[10px] ${cause.likelihood === "High"
-                            ? "bg-[color:var(--signal-crit)]/20 text-[color:var(--signal-crit)]"
-                            : cause.likelihood === "Medium"
-                              ? "bg-[color:var(--signal-warn)]/20 text-[color:var(--signal-warn)]"
-                              : "bg-[color:var(--signal-ok)]/20 text-[color:var(--signal-ok)]"
+                          ? "bg-[color:var(--signal-crit)]/20 text-[color:var(--signal-crit)]"
+                          : cause.likelihood === "Medium"
+                            ? "bg-[color:var(--signal-warn)]/20 text-[color:var(--signal-warn)]"
+                            : "bg-[color:var(--signal-ok)]/20 text-[color:var(--signal-ok)]"
                           }`}
                       >
                         {cause.likelihood}

@@ -540,6 +540,8 @@ Do NOT generate placeholder names like "Rahul Sharma", placeholder numbers like 
 };
 
 // Assemble the prior-agent findings block + the task line for a structured agent.
+// Uses a direct JOIN to avoid picking an empty/wrong conversation when multiple exist,
+// and takes only the last assistant message so placeholder user messages are excluded.
 function buildPriorFindingsQuestion(
   db: ReturnType<typeof getDb>,
   caseId: string,
@@ -550,18 +552,16 @@ function buildPriorFindingsQuestion(
   for (let i = 0; i < currentIdx; i++) {
     const prevKey = AGENT_KEYS[i];
     const prevAgent = AGENT_BY_KEY[prevKey as AgentKey];
-    const prevConvo = db
-      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ?")
-      .get(caseId, prevKey) as { id: string } | undefined;
-    if (prevConvo) {
-      const prevMsgs = db
-        .prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
-        .all(prevConvo.id) as { role: string; content: string }[];
-      if (prevMsgs.length) {
-        q += `=== ${prevAgent.name} ===\n`;
-        for (const m of prevMsgs) q += `[${m.role === "user" ? "Operator" : "Assistant"}]: ${m.content}\n`;
-        q += "\n";
-      }
+    const lastMsg = db
+      .prepare(
+        `SELECT m.content FROM messages m
+         INNER JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
+         ORDER BY m.created_at DESC LIMIT 1`,
+      )
+      .get(caseId, prevKey) as { content: string } | undefined;
+    if (lastMsg?.content) {
+      q += `=== ${prevAgent.name} ===\n${lastMsg.content}\n\n`;
     }
   }
   q += "\n" + (STRUCTURED_TASK_LINES[agentKey] || `Perform your analysis for ${AGENT_BY_KEY[agentKey as AgentKey]?.name}.`);
@@ -1219,22 +1219,20 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
         .get(data.caseId) as CaseRow | undefined;
       if (!rcaCase) throw new Error("Case not found");
       let fiveWhySummary = "";
-      const fiveWhyConvo = db
-        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'five_why'")
-        .get(data.caseId) as { id: string } | undefined;
-      if (fiveWhyConvo) {
-        const lastWhy = db
-          .prepare(
-            "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
-          )
-          .get(fiveWhyConvo.id) as { content: string } | undefined;
-        if (lastWhy) {
-          try {
-            const pw = JSON.parse(lastWhy.content);
-            fiveWhySummary = `Question: ${pw.question || ""}\nOperator Instruction: ${pw.operatorInstruction || ""}`;
-          } catch {
-            fiveWhySummary = lastWhy.content;
-          }
+      const lastWhy = db
+        .prepare(
+          `SELECT m.content FROM messages m
+           INNER JOIN conversations c ON c.id = m.conversation_id
+           WHERE c.rca_case_id = ? AND c.agent_key = 'five_why' AND m.role = 'assistant'
+           ORDER BY m.created_at DESC LIMIT 1`,
+        )
+        .get(data.caseId) as { content: string } | undefined;
+      if (lastWhy) {
+        try {
+          const pw = JSON.parse(lastWhy.content);
+          fiveWhySummary = `Question: ${pw.question || ""}\nOperator Instruction: ${pw.operatorInstruction || ""}`;
+        } catch {
+          fiveWhySummary = lastWhy.content;
         }
       }
       prompt = buildFishboneQuestion(rcaCase, fiveWhySummary);
@@ -1810,22 +1808,20 @@ export const runFullAutomation = createServerFn({ method: "POST" })
               prompt = buildFiveWhyQuestion(rcaCase);
             } else if (agentKey === "fishbone") {
               let fiveWhySummary = "";
-              const fwConvo = db
-                .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'five_why'")
-                .get(data.caseId) as { id: string } | undefined;
-              if (fwConvo) {
-                const lm = db
-                  .prepare(
-                    "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
-                  )
-                  .get(fwConvo.id) as { content: string } | undefined;
-                if (lm) {
-                  try {
-                    const pw = JSON.parse(lm.content);
-                    fiveWhySummary = `Question: ${pw.question || ""}\nInstruction: ${pw.operatorInstruction || ""}`;
-                  } catch {
-                    fiveWhySummary = lm.content;
-                  }
+              const fwLastMsg = db
+                .prepare(
+                  `SELECT m.content FROM messages m
+                   INNER JOIN conversations c ON c.id = m.conversation_id
+                   WHERE c.rca_case_id = ? AND c.agent_key = 'five_why' AND m.role = 'assistant'
+                   ORDER BY m.created_at DESC LIMIT 1`,
+                )
+                .get(data.caseId) as { content: string } | undefined;
+              if (fwLastMsg) {
+                try {
+                  const pw = JSON.parse(fwLastMsg.content);
+                  fiveWhySummary = `Question: ${pw.question || ""}\nInstruction: ${pw.operatorInstruction || ""}`;
+                } catch {
+                  fiveWhySummary = fwLastMsg.content;
                 }
               }
               prompt = buildFishboneQuestion(rcaCase, fiveWhySummary);
@@ -1914,17 +1910,15 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                 for (let i = 0; i < currentIdx; i++) {
                   const pk = AGENT_KEYS[i];
                   const pa = AGENT_BY_KEY[pk as AgentKey];
-                  const pc = db
-                    .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ?")
-                    .get(data.caseId, pk) as { id: string } | undefined;
-                  if (pc) {
-                    const lm = db
-                      .prepare(
-                        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
-                      )
-                      .get(pc.id) as { content: string } | undefined;
-                    if (lm) pf += `=== ${pa?.name} ===\n${lm.content}\n\n`;
-                  }
+                  const lm = db
+                    .prepare(
+                      `SELECT m.content FROM messages m
+                       INNER JOIN conversations c ON c.id = m.conversation_id
+                       WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
+                       ORDER BY m.created_at DESC LIMIT 1`,
+                    )
+                    .get(data.caseId, pk) as { content: string } | undefined;
+                  if (lm?.content) pf += `=== ${pa?.name} ===\n${lm.content}\n\n`;
                 }
                 return pf;
               };
