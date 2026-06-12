@@ -73,8 +73,8 @@
   --popover: oklch(0.2 0.022 255);
   --popover-foreground: oklch(0.94 0.01 100);
 
-  --primary: oklch(0.78 0.17 70); /* amber/orange — primary action */
-  --primary-foreground: oklch(0.16 0.02 255);
+  --primary: #f69f3a; /* standard orange/amber */
+  --primary-foreground: #ffffff;
 
   --secondary: oklch(0.24 0.025 255);
   --secondary-foreground: oklch(0.94 0.01 100);
@@ -89,8 +89,8 @@
   --destructive-foreground: oklch(0.98 0 0);
 
   --border: oklch(0.28 0.022 255);
-  --input: oklch(0.24 0.022 255);
-  --ring: oklch(0.78 0.17 70);
+  --input: oklch(0.45 0.015 255);
+  --ring: #f69f3a;
 
   --chart-1: oklch(0.78 0.17 70);
   --chart-2: oklch(0.7 0.16 200);
@@ -113,7 +113,7 @@
   --sidebar-ring: oklch(0.78 0.17 70);
 
   --input-bg: oklch(0.12 0.01 255);
-  --input-border: oklch(0.38 0.015 255);
+  --input-border: oklch(0.45 0.015 255);
   --input-focus-bg: oklch(0.14 0.01 255);
   --input-placeholder: oklch(0.58 0.015 250);
 }
@@ -127,8 +127,8 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.2 0.015 255);
 
-  --primary: oklch(0.65 0.17 70);
-  --primary-foreground: oklch(0.98 0 0);
+  --primary: #f69f3a;
+  --primary-foreground: #ffffff;
 
   --secondary: oklch(0.94 0.01 255);
   --secondary-foreground: oklch(0.2 0.015 255);
@@ -143,8 +143,8 @@
   --destructive-foreground: oklch(0.98 0 0);
 
   --border: oklch(0.88 0.015 255);
-  --input: oklch(0.96 0.01 255);
-  --ring: oklch(0.65 0.17 70);
+  --input: oklch(0.65 0.015 255);
+  --ring: #f69f3a;
 
   --chart-1: oklch(0.65 0.17 70);
   --chart-2: oklch(0.58 0.16 200);
@@ -167,7 +167,7 @@
   --sidebar-ring: oklch(0.65 0.17 70);
 
   --input-bg: oklch(0.98 0.005 255);
-  --input-border: oklch(0.8 0.015 255);
+  --input-border: oklch(0.65 0.015 255);
   --input-focus-bg: oklch(1 0 0);
   --input-placeholder: oklch(0.48 0.015 250);
 }
@@ -186,8 +186,14 @@
   input[type="text"],
   input[type="email"],
   input[type="password"],
+  input[type="number"],
+  input[type="search"],
+  input[type="tel"],
+  input[type="url"],
+  input:not([type]),
   textarea,
-  select {
+  select,
+  .border-input {
     background-color: var(--input-bg) !important;
     border: 1px solid var(--input-border) !important;
     color: var(--color-foreground) !important;
@@ -198,17 +204,29 @@
   input[type="text"]:focus,
   input[type="email"]:focus,
   input[type="password"]:focus,
+  input[type="number"]:focus,
+  input[type="search"]:focus,
+  input[type="tel"]:focus,
+  input[type="url"]:focus,
+  input:not([type]):focus,
   textarea:focus,
-  select:focus {
+  select:focus,
+  .border-input:focus,
+  .border-input[data-state="open"] {
     background-color: var(--input-focus-bg) !important;
     border-color: var(--color-primary) !important;
-    box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.25) !important;
+    box-shadow: 0 0 0 2px rgba(246, 159, 58, 0.25) !important;
     outline: none !important;
   }
 
   input[type="text"]::placeholder,
   input[type="email"]::placeholder,
   input[type="password"]::placeholder,
+  input[type="number"]::placeholder,
+  input[type="search"]::placeholder,
+  input[type="tel"]::placeholder,
+  input[type="url"]::placeholder,
+  input:not([type])::placeholder,
   textarea::placeholder {
     color: var(--input-placeholder) !important;
     opacity: 0.95 !important;

@@ -1,19 +1,15 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
-import { useAuth } from "@/hooks/use-auth";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { getAuthToken } from "@/lib/auth-check";
 
-export const Route = createFileRoute("/")({ component: Index });
+export const Route = createFileRoute("/")({
+  beforeLoad: () => {
+    const token = getAuthToken();
+    if (token) {
+      throw redirect({ to: "/dashboard" });
+    } else {
+      throw redirect({ to: "/login" });
+    }
+  },
+  component: () => null,
+});
 
-function Index() {
-  const { user, loading } = useAuth();
-  const nav = useNavigate();
-  useEffect(() => {
-    if (loading) return;
-    nav({ to: user ? "/dashboard" : "/login" });
-  }, [user, loading, nav]);
-  return (
-    <div className="min-h-screen flex items-center justify-center text-muted-foreground mono text-sm">
-      Routing…
-    </div>
-  );
-}

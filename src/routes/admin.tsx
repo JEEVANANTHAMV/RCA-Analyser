@@ -1,3 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { getAuthToken } from "@/lib/auth-check";
 
-export const Route = createFileRoute("/admin")({});
+export const Route = createFileRoute("/admin")({
+  beforeLoad: () => {
+    const token = getAuthToken();
+    if (!token) {
+      throw redirect({ to: "/login" });
+    }
+  },
+});

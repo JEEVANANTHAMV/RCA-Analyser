@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Outlet,
@@ -6,11 +7,43 @@ import {
   useRouter,
   HeadContent,
   Scripts,
+  useRouterState,
 } from "@tanstack/react-router";
 import { AuthProvider } from "@/hooks/use-auth";
 import { ThemeProvider } from "@/components/theme-provider";
+import { Loader2, Activity } from "lucide-react";
 
 import appCss from "../styles.css?url";
+
+function TransitionSpinner() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const isNavigating = useRouterState({ select: (s) => s.status === "pending" });
+
+  if (!mounted || !isNavigating) return null;
+
+  return (
+    <div className="fixed inset-0 z-[9999] bg-background/80 backdrop-blur-md flex flex-col items-center justify-center animate-fadeIn">
+      <div className="panel p-6 max-w-sm w-full mx-4 text-center border-primary/20 bg-card/90 shadow-2xl space-y-4">
+        <div className="flex justify-between items-center border-b border-border pb-2">
+          <span className="text-xs font-mono tracking-wider text-muted-foreground uppercase">// SECURE LINK HANDSHAKE</span>
+          <span className="status-dot text-primary animate-pulse" />
+        </div>
+        <div className="relative py-6 flex flex-col items-center justify-center">
+          <Loader2 className="w-10 h-10 text-primary animate-spin" />
+          <Activity className="w-4 h-4 text-accent absolute animate-pulse" />
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-sm font-mono font-bold text-foreground tracking-wide">CONNECTING TO WORKSPACE...</p>
+          <p className="text-xs font-mono text-muted-foreground">Synchronizing database assets and models</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function NotFoundComponent() {
   return (
@@ -92,7 +125,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootShell({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
         <script
@@ -130,6 +163,7 @@ function RootComponent() {
       <ThemeProvider>
         <AuthProvider>
           <Outlet />
+          <TransitionSpinner />
         </AuthProvider>
       </ThemeProvider>
     </QueryClientProvider>

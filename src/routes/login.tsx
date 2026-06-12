@@ -1,12 +1,21 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate, redirect } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
+import { getAuthToken } from "@/lib/auth-check";
 
-export const Route = createFileRoute("/login")({ component: LoginPage });
+export const Route = createFileRoute("/login")({
+  beforeLoad: () => {
+    const token = getAuthToken();
+    if (token) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: LoginPage,
+});
 
 function LoginPage() {
   const nav = useNavigate();

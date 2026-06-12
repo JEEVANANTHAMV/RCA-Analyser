@@ -247,6 +247,8 @@ function CasePage() {
   });
 
   const [agentStep, setAgentStep] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<
     Array<{ filename: string; contentType: string; data: string }>
@@ -5573,7 +5575,7 @@ function CasePage() {
                 )}
                 {Object.values(whyStream1).some(Boolean) ? (
                   <div className="grid grid-cols-2 gap-6">
-                    {([["Stream 1 — Primary Chain", whyStream1, "amber"], ["Stream 2 — Contributing Chain", whyStream2, "violet"]] as const).map(([label, stream, col]) => {
+                    {([["Stream 1 — Primary Chain", whyStream1, "amber"], ["Stream 2 — Contributing Chain", whyStream2, "accent"]] as const).map(([label, stream, col]) => {
                       const entries = Object.entries(stream as Record<string, string>).filter(([, v]) => v);
                       if (!entries.length) return null;
                       return (
@@ -5615,8 +5617,8 @@ function CasePage() {
 
             {/* ══ STEP 3 — FISHBONE ══ */}
             {cd && Object.keys(fbCats).some(k => Array.isArray(fbCats[k]) && fbCats[k].length) && (
-              <div className="bg-secondary/15 border border-violet-500/20 rounded-xl p-5 space-y-4">
-                <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-violet-400" />
+              <div className="bg-secondary/15 border border-primary/20 rounded-xl p-5 space-y-4">
+                <SH num={3} title="Fishbone / Ishikawa Cause Analysis" color="text-primary" />
                 <div className="grid grid-cols-3 gap-3">
                   {Object.entries(fbCats).filter(([, v]) => Array.isArray(v) && v.length).map(([key, causes]) => {
                     const color = catColors[key] || "#64748B";
@@ -6148,15 +6150,15 @@ function CasePage() {
 
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-        <div className="w-full max-w-lg mx-4 bg-background border border-violet-500/30 rounded-xl shadow-2xl shadow-violet-500/10 overflow-hidden">
-          <div className="p-4 border-b border-border flex items-center justify-between bg-violet-500/5">
+        <div className="w-full max-w-lg mx-4 bg-background border border-primary/30 rounded-xl shadow-2xl shadow-primary/10 overflow-hidden">
+          <div className="p-4 border-b border-border flex items-center justify-between bg-primary/5">
             <div className="flex items-center gap-2">
               {autoRunning ? (
-                <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+                <Loader2 className="w-4 h-4 text-primary animate-spin" />
               ) : isDone ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
               ) : (
-                <Zap className="w-4 h-4 text-violet-400" />
+                <Zap className="w-4 h-4 text-primary" />
               )}
               <span className="font-bold text-sm mono">FULL RCA AUTOMATION</span>
             </div>
@@ -6173,8 +6175,8 @@ function CasePage() {
           <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
             {autoProgress.length === 0 && !autoRunning && (
               <div className="text-center py-6 space-y-3">
-                <div className="w-14 h-14 rounded-full bg-violet-500/10 border border-violet-500/30 flex items-center justify-center mx-auto">
-                  <Zap className="w-7 h-7 text-violet-400" />
+                <div className="w-14 h-14 rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center mx-auto">
+                  <Zap className="w-7 h-7 text-primary" />
                 </div>
                 <div className="space-y-1">
                   <p className="font-semibold text-sm">Automated Full RCA Pipeline</p>
@@ -6183,7 +6185,7 @@ function CasePage() {
                   </p>
                 </div>
                 <div className="text-xs text-muted-foreground/70 bg-secondary/30 rounded-lg p-3 text-left space-y-1">
-                  <p className="font-mono font-semibold text-violet-400/80">What happens:</p>
+                  <p className="font-mono font-semibold text-primary/80">What happens:</p>
                   <p>• Data Collector validates the incident</p>
                   <p>• 5-Why drills down to root cause (auto-answered)</p>
                   <p>• Fishbone builds the Ishikawa diagram (10-step auto-flow)</p>
@@ -6206,7 +6208,7 @@ function CasePage() {
                   className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs transition-all ${status === "complete"
                     ? "bg-emerald-500/5 border-emerald-500/20"
                     : status === "running"
-                      ? "bg-violet-500/5 border-violet-500/30"
+                      ? "bg-primary/5 border-primary/30"
                       : status === "skipped"
                         ? "bg-muted/20 border-border/30 opacity-60"
                         : status === "error"
@@ -6218,7 +6220,7 @@ function CasePage() {
                     {status === "complete" ? (
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                     ) : status === "running" ? (
-                      <Loader2 className="w-3.5 h-3.5 text-violet-400 animate-spin" />
+                      <Loader2 className="w-3.5 h-3.5 text-primary animate-spin" />
                     ) : status === "skipped" ? (
                       <XCircle className="w-3.5 h-3.5 text-muted-foreground/50" />
                     ) : status === "error" ? (
@@ -6238,14 +6240,14 @@ function CasePage() {
                       <p className="text-[10px] text-muted-foreground/70 mt-0.5 truncate">{lastStep.message}</p>
                     )}
                     {status === "running" && autoLiveText[agent.key] && (
-                      <pre className="mt-1.5 max-h-28 overflow-y-auto rounded bg-black/40 border border-violet-500/20 p-2 text-[10px] leading-relaxed text-violet-200/80 whitespace-pre-wrap break-words">
+                      <pre className="mt-1.5 max-h-28 overflow-y-auto rounded bg-black/40 border border-primary/20 p-2 text-[10px] leading-relaxed text-primary/85 whitespace-pre-wrap break-words">
                         {autoLiveText[agent.key].slice(-1200)}
-                        <span className="inline-block w-1.5 h-3 bg-violet-400/70 animate-pulse align-middle ml-0.5" />
+                        <span className="inline-block w-1.5 h-3 bg-primary/70 animate-pulse align-middle ml-0.5" />
                       </pre>
                     )}
                   </div>
                   {status === "running" && lastStep && (
-                    <span className="text-[10px] text-violet-400/70 mono shrink-0">step {lastStep.step}</span>
+                    <span className="text-[10px] text-primary/70 mono shrink-0">step {lastStep.step}</span>
                   )}
                 </div>
               );
@@ -6290,13 +6292,13 @@ function CasePage() {
                 disabled={autoMut.isPending}
                 onClick={() => {
                   if (isDone) {
-                    setShowAutoModal(false);
+                     setShowAutoModal(false);
                   } else {
                     setAutoProgress([]);
                     autoMut.mutate();
                   }
                 }}
-                className="bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold"
+                className="bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-semibold"
               >
                 {isDone ? (
                   "Close & Review"
@@ -6308,6 +6310,182 @@ function CasePage() {
                 )}
               </Button>
             )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderAgentSidebar = (isMobile = false) => {
+    return (
+      <div className={`panel flex flex-col overflow-hidden ${isMobile ? "w-80 h-full max-h-screen border-none bg-card shadow-2xl" : "h-full"}`}>
+        <div className="panel-header flex items-center justify-between">
+          <span>{(isMobile || !sidebarCollapsed) ? "ACTIVE AGENT" : "RCA"}</span>
+          <div className="flex items-center gap-1">
+            {!isMobile && (
+              <button
+                onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                className="text-muted-foreground hover:text-foreground hidden lg:block p-1 rounded hover:bg-secondary/40"
+                title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              >
+                {sidebarCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
+              </button>
+            )}
+            {isMobile && (
+              <button
+                onClick={() => setMobileSidebarOpen(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-secondary/40"
+                title="Close"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+        
+        <div className="p-3 space-y-3 flex-1 overflow-y-auto">
+          {currentAgent && (isMobile || !sidebarCollapsed) && (
+            <div className="p-3 rounded-lg bg-primary/10 border border-primary/30 animate-slideIn">
+              <div className="flex items-center gap-2 mb-1">
+                <Badge className="text-[10px] mono bg-primary/20 text-primary border-primary/40">
+                  Step {currentAgent.order}/8
+                </Badge>
+              </div>
+              <h3 className="font-semibold text-sm">{currentAgent.name}</h3>
+              <p className="text-xs text-muted-foreground mt-1">{currentAgent.description}</p>
+            </div>
+          )}
+
+          <div className="border-t border-border pt-2 space-y-1">
+            {(isMobile || !sidebarCollapsed) && (
+              <p className="text-[10px] text-muted-foreground mono uppercase px-2 font-semibold tracking-wider mb-1">AGENTS PROGRESS</p>
+            )}
+            
+            {AGENTS.map((a, idx) => {
+              const isSelected = idx === agentStep;
+              const isCompleted = completedAgents.has(a.key);
+              const isSkipped = skippedAgents.has(a.key);
+              const collectorDoneSidebar = editLocked || completedAgents.has("data_collector");
+              const isClickable =
+                idx <= agentStep ||
+                isCompleted ||
+                isSkipped ||
+                collectorDoneSidebar;
+
+              return (
+                <button
+                  key={a.key}
+                  disabled={!isClickable}
+                  onClick={() => {
+                    if (isClickable) {
+                      goToAgent(idx);
+                      if (isMobile) setMobileSidebarOpen(false);
+                    }
+                  }}
+                  className={`w-full text-left rounded-lg text-xs transition-all flex items-center justify-between border ${
+                    isSelected
+                      ? "bg-primary/10 border-primary/40 text-primary font-bold shadow-[0_0_10px_rgba(251,191,36,0.15)]"
+                      : isCompleted
+                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10"
+                        : isSkipped
+                          ? "bg-muted/30 border-transparent text-muted-foreground/50 line-through hover:bg-secondary/40"
+                          : isClickable
+                            ? "bg-transparent border-transparent text-foreground hover:bg-secondary"
+                            : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
+                  } ${isMobile || !sidebarCollapsed ? "px-3 py-2" : "p-2 justify-center"}`}
+                >
+                  {(isMobile || !sidebarCollapsed) ? (
+                    <div className="flex items-center gap-2">
+                      <span className={`mono text-[10px] ${
+                        isSelected
+                          ? "text-primary/70"
+                          : isCompleted
+                            ? "text-emerald-400/70"
+                            : "text-muted-foreground/40"
+                      }`}>{a.order}.</span>
+                      <span className="font-mono">{a.shortName}</span>
+                    </div>
+                  ) : (
+                    <div className="w-5 h-5 rounded bg-secondary/50 flex items-center justify-center font-mono text-[10px] font-bold">
+                      {a.order}
+                    </div>
+                  )}
+
+                  {(isMobile || !sidebarCollapsed) && (
+                    isCompleted ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    ) : isSkipped ? (
+                      <XCircle className="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+                    ) : isSelected ? (
+                      <Circle className="w-3.5 h-3.5 text-primary animate-pulse shrink-0" />
+                    ) : (
+                      <Circle className="w-3.5 h-3.5 text-muted-foreground/20 shrink-0" />
+                    )
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className={`border-t border-border p-3 space-y-2 flex flex-col ${(isMobile || !sidebarCollapsed) ? "" : "items-center"}`}>
+          {currentAgent && agentStep < AGENTS.length - 1 && (
+            completedAgents.has(currentAgent.key) || (currentAgent.key === "data_collector" && editLocked) ? (
+              <Button
+                variant="default"
+                size="sm"
+                className="w-full bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center justify-center"
+                onClick={() => goToAgent(agentStep + 1)}
+              >
+                {(isMobile || !sidebarCollapsed) ? (
+                  <>
+                    Next Step: {AGENTS[agentStep + 1].shortName}
+                    <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
+                  </>
+                ) : (
+                  <ArrowRight className="w-4 h-4" />
+                )}
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full flex items-center justify-center"
+                onClick={skipAgent}
+                title="Skip to Next"
+              >
+                <SkipForward className="w-3.5 h-3.5" />
+                {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">Skip to Next</span>}
+              </Button>
+            )
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            className="w-full flex items-center justify-center"
+            onClick={() => reportMut.mutate()}
+            disabled={reportMut.isPending}
+            title={caseStatus === "completed" ? "Update Report" : "Save Report"}
+          >
+            <FileCheck2 className="w-3.5 h-3.5" />
+            {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">{caseStatus === "completed" ? "Update Report" : "Save Report"}</span>}
+          </Button>
+          <div className="pt-1 border-t border-border/40 w-full">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full border-primary/40 text-primary hover:text-primary/90 hover:bg-primary/10 hover:border-primary/60 font-semibold flex items-center justify-center"
+              onClick={() => { setShowAutoModal(true); }}
+              disabled={autoMut.isPending}
+              title="Run Full Analysis"
+            >
+              {autoMut.isPending ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Zap className="w-3.5 h-3.5" />
+              )}
+              {(isMobile || !sidebarCollapsed) && <span className="ml-1.5">Run Full Analysis</span>}
+            </Button>
           </div>
         </div>
       </div>
@@ -6567,6 +6745,15 @@ function CasePage() {
             <Badge variant="outline" className="text-xs mono">
               {completedAgents.size + skippedAgents.size}/{AGENTS.length} steps
             </Badge>
+            {/* Mobile Sidebar Toggle Button */}
+            <button
+              onClick={() => setMobileSidebarOpen(true)}
+              className="lg:hidden h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border border-primary/40 bg-primary/10 hover:bg-primary/20 text-primary transition-colors"
+              title="Open steps menu"
+            >
+              <Layers className="w-3 h-3" />
+              <span>Steps</span>
+            </button>
             {/* Fullscreen button */}
             <button
               onClick={toggleFullscreen}
@@ -6655,7 +6842,7 @@ function CasePage() {
                   ) : (
                     <Circle className="w-3 h-3" />
                   )}
-                  <span className="hidden lg:inline">{agent.shortName}</span>
+                  <span className="hidden sm:inline">{agent.shortName}</span>
                 </button>
                 {idx < AGENTS.length - 1 && (
                   <ArrowRight
@@ -6671,123 +6858,26 @@ function CasePage() {
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="grid lg:grid-cols-[240px_1fr] gap-3 flex-1 min-h-0">
-        {/* Agent Sidebar */}
-        <div className="panel flex flex-col overflow-hidden">
-          <div className="panel-header">
-            <span>ACTIVE AGENT</span>
+      {/* Mobile Sidebar Drawer Overlay */}
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm lg:hidden animate-fadeIn"
+          onClick={() => setMobileSidebarOpen(false)}
+        >
+          <div
+            className="absolute left-0 top-0 bottom-0 w-80 bg-background border-r border-border animate-slideIn flex flex-col h-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderAgentSidebar(true)}
           </div>
-          <div className="p-3 space-y-2 flex-1 overflow-y-auto">
-            {currentAgent && (
-              <div className="p-3 rounded-lg bg-primary/10 border border-primary/30 animate-slideIn">
-                <div className="flex items-center gap-2 mb-1">
-                  <Badge className="text-[10px] mono bg-primary/20 text-primary border-primary/40">
-                    Step {currentAgent.order}/8
-                  </Badge>
-                </div>
-                <h3 className="font-semibold text-sm">{currentAgent.name}</h3>
-                <p className="text-xs text-muted-foreground mt-1">{currentAgent.description}</p>
-              </div>
-            )}
-            <div className="border-t border-border pt-2 space-y-1">
-              <p className="text-[10px] text-muted-foreground mono uppercase px-2 font-semibold tracking-wider">AGENTS PROGRESS</p>
-              {AGENTS.map((a, idx) => {
-                const isSelected = idx === agentStep;
-                const isCompleted = completedAgents.has(a.key);
-                const isSkipped = skippedAgents.has(a.key);
-                const collectorDoneSidebar = editLocked || completedAgents.has("data_collector");
-                const isClickable =
-                  idx <= agentStep ||
-                  isCompleted ||
-                  isSkipped ||
-                  collectorDoneSidebar;
+        </div>
+      )}
 
-                return (
-                  <button
-                    key={a.key}
-                    disabled={!isClickable}
-                    onClick={() => isClickable && goToAgent(idx)}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-all flex items-center justify-between border ${isSelected
-                      ? "bg-primary/10 border-primary/40 text-primary font-bold shadow-[0_0_10px_rgba(251,191,36,0.15)]"
-                      : isCompleted
-                        ? "bg-emerald-500/5 border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10"
-                        : isSkipped
-                          ? "bg-muted/30 border-transparent text-muted-foreground/50 line-through hover:bg-secondary/40"
-                          : isClickable
-                            ? "bg-transparent border-transparent text-foreground hover:bg-secondary"
-                            : "bg-transparent border-transparent text-muted-foreground/40 cursor-not-allowed"
-                      }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`mono text-[10px] ${isSelected
-                        ? "text-primary/70"
-                        : isCompleted
-                          ? "text-emerald-400/70"
-                          : "text-muted-foreground/40"
-                        }`}>{a.order}.</span>
-                      <span className="font-mono">{a.shortName}</span>
-                    </div>
-                    {isCompleted ? (
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    ) : isSkipped ? (
-                      <XCircle className="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
-                    ) : isSelected ? (
-                      <Circle className="w-3.5 h-3.5 text-primary animate-pulse shrink-0" />
-                    ) : (
-                      <Circle className="w-3.5 h-3.5 text-muted-foreground/20 shrink-0" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="border-t border-border p-3 space-y-2">
-            {currentAgent && agentStep < AGENTS.length - 1 && (
-              completedAgents.has(currentAgent.key) || (currentAgent.key === "data_collector" && editLocked) ? (
-                <Button
-                  variant="default"
-                  size="sm"
-                  className="w-full bg-primary hover:bg-primary/95 text-primary-foreground font-semibold"
-                  onClick={() => goToAgent(agentStep + 1)}
-                >
-                  Next Step: {AGENTS[agentStep + 1].shortName}
-                  <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
-                </Button>
-              ) : (
-                <Button variant="outline" size="sm" className="w-full" onClick={skipAgent}>
-                  <SkipForward className="w-3.5 h-3.5 mr-1.5" />
-                  Skip to Next
-                </Button>
-              )
-            )}
-            <Button
-              variant="secondary"
-              size="sm"
-              className="w-full"
-              onClick={() => reportMut.mutate()}
-              disabled={reportMut.isPending}
-            >
-              <FileCheck2 className="w-3.5 h-3.5 mr-1.5" />
-              {caseStatus === "completed" ? "Update Report" : "Save Report"}
-            </Button>
-            <div className="pt-1 border-t border-border/40">
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full border-violet-500/40 text-violet-400 hover:text-violet-300 hover:bg-violet-500/10 hover:border-violet-500/60 font-semibold"
-                onClick={() => { setShowAutoModal(true); }}
-                disabled={autoMut.isPending}
-              >
-                {autoMut.isPending ? (
-                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                ) : (
-                  <Zap className="w-3.5 h-3.5 mr-1.5" />
-                )}
-                Run Full Analysis
-              </Button>
-            </div>
-          </div>
+      {/* Main Content */}
+      <div className={`grid gap-3 flex-1 min-h-0 ${sidebarCollapsed ? "lg:grid-cols-[68px_1fr]" : "lg:grid-cols-[240px_1fr]"} grid-cols-1`}>
+        {/* Agent Sidebar (Desktop Only) */}
+        <div className="hidden lg:flex flex-col h-full overflow-hidden">
+          {renderAgentSidebar(false)}
         </div>
 
         {/* Main Workspace Area (split grid depending on showChat) */}
