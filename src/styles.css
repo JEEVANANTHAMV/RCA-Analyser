@@ -366,3 +366,48 @@
   min-height: auto !important;
   outline: none !important;
 }
+
+/* Light mode fixes: Tailwind fixed-shade colors like emerald-400, amber-500 look great in
+   dark mode but have poor contrast on light backgrounds. Override the most common offenders. */
+.light {
+  /* Green / success — emerald-400 (#34d399) is too light; darken to forest green */
+  --tw-emerald-text: oklch(0.44 0.18 155);
+
+  /* Sidebar completed state */
+  & .text-emerald-400 { color: oklch(0.44 0.18 155) !important; }
+  & .text-emerald-300 { color: oklch(0.48 0.18 155) !important; }
+  & .bg-emerald-500\/5  { background-color: oklch(0.58 0.17 145 / 0.1) !important; }
+  & .bg-emerald-500\/10 { background-color: oklch(0.58 0.17 145 / 0.15) !important; }
+  & .bg-emerald-500\/15 { background-color: oklch(0.58 0.17 145 / 0.18) !important; }
+  & .border-emerald-500\/20 { border-color: oklch(0.58 0.17 145 / 0.45) !important; }
+  & .border-emerald-500\/40 { border-color: oklch(0.58 0.17 145 / 0.6) !important; }
+  & .text-emerald-400\/70 { color: oklch(0.44 0.18 155 / 0.8) !important; }
+
+  /* Amber / warning — amber-500 is borderline; use darker amber */
+  & .text-amber-500    { color: oklch(0.5 0.19 65) !important; }
+  & .text-amber-500\/80 { color: oklch(0.5 0.19 65 / 0.85) !important; }
+  & .text-amber-500\/90 { color: oklch(0.5 0.19 65 / 0.9) !important; }
+  & .bg-amber-500\/5  { background-color: oklch(0.65 0.17 70 / 0.12) !important; }
+  & .bg-amber-500\/10 { background-color: oklch(0.65 0.17 70 / 0.18) !important; }
+  & .border-amber-500\/20 { border-color: oklch(0.65 0.17 70 / 0.5) !important; }
+  & .border-amber-500\/30 { border-color: oklch(0.65 0.17 70 / 0.6) !important; }
+  & .text-amber-400    { color: oklch(0.5 0.19 65) !important; }
+
+  /* Violet / purple accents */
+  & .text-violet-400  { color: oklch(0.5 0.2 290) !important; }
+  & .border-violet-500\/40 { border-color: oklch(0.55 0.2 290 / 0.55) !important; }
+  & .hover\:bg-violet-500\/10:hover { background-color: oklch(0.55 0.2 290 / 0.12) !important; }
+
+  /* Muted opacity text — /40 is invisible on white; floor to /70 */
+  & .text-muted-foreground\/40 { color: var(--color-muted-foreground) !important; opacity: 0.65 !important; }
+  & .text-muted-foreground\/50 { color: var(--color-muted-foreground) !important; opacity: 0.7 !important; }
+
+  /* panel-header was designed for dark; ensure contrast in light */
+  & .panel-header {
+    color: oklch(0.38 0.015 250);
+    background-color: oklch(0.95 0.008 255);
+  }
+
+  /* Status dot glow looks odd on light BG — reduce it */
+  & .status-dot { box-shadow: 0 0 3px currentColor; }
+}

@@ -68,7 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const doLogin = async (email: string, password: string) => {
     try {
       const result = await signinFn({ data: { email, password } });
-      setCookie("auth_token", result.token, 7);
+      setCookie("auth_token", result.token, 1 / 3);
       setUser(result.user);
       return {};
     } catch (e: unknown) {
@@ -80,7 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const doSignup = async (email: string, password: string, fullName: string) => {
     try {
       const result = await signupFn({ data: { email, password, fullName } });
-      setCookie("auth_token", result.token, 7);
+      setCookie("auth_token", result.token, 1 / 3);
       setUser(result.user);
       return {};
     } catch (e: unknown) {
@@ -97,7 +97,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   ) => {
     try {
       const result = await signupWithInviteFn({ data: { code, email, password, fullName } });
-      setCookie("auth_token", result.token, 7);
+      setCookie("auth_token", result.token, 1 / 3);
       setUser(result.user);
       return {};
     } catch (e: unknown) {

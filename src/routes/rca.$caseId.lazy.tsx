@@ -68,6 +68,8 @@ import {
   UserPlus,
   UserMinus,
   RotateCcw,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -356,7 +358,9 @@ function CasePage() {
   const [isDirty, setIsDirty] = useState(false);
   const [editingStepIdx, setEditingStepIdx] = useState<number | null>(null);
   const [editCauseId, setEditCauseId] = useState<string>("");
+  const [editCauseIds, setEditCauseIds] = useState<string[]>([]);
   const [editCustomText, setEditCustomText] = useState<string>("");
+  const [collabSearch, setCollabSearch] = useState("");
 
   // Sharing / Collaborators / History state
   const [showSharePopover, setShowSharePopover] = useState(false);
@@ -364,6 +368,7 @@ function CasePage() {
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [publicLinkCopied, setPublicLinkCopied] = useState(false);
   const [togglingPublic, setTogglingPublic] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Automation state
   const [showAutoModal, setShowAutoModal] = useState(false);
@@ -416,7 +421,7 @@ function CasePage() {
 
   const saveCaseIncidentFn = useServerFn(updateCaseIncidentData);
   const saveCollectorMut = useMutation({
-    mutationFn: async (overrideData?: { locked?: boolean }) => {
+    mutationFn: async (overrideData?: { locked?: boolean; silent?: boolean }) => {
       const gapsArr = editGaps.split("\n").map(line => line.trim()).filter(Boolean);
       const followUpsArr = editFollowUps.split("\n").map(line => line.trim()).filter(Boolean);
       const lockedVal = overrideData && overrideData.locked !== undefined ? overrideData.locked : editLocked;
@@ -437,11 +442,11 @@ function CasePage() {
         }
       });
     },
-    onSuccess: () => {
+    onSuccess: (_, variables) => {
       qc.invalidateQueries({ queryKey: ["msgs", convIdRef.current] });
       qc.invalidateQueries({ queryKey: ["case", caseId] });
       setIsDirty(false);
-      toast.success("Incident problem details saved and validated!");
+      if (!variables?.silent) toast.success("Incident problem details saved and validated!");
     },
     onError: (err: any) => {
       toast.error(err.message || "Failed to save details");
@@ -833,6 +838,14 @@ function CasePage() {
     setIsDirty(false);
   }, [isDirty]);
 
+  const toggleFullscreen = useCallback(() => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  }, []);
+
   const messages = msgsQ.data?.messages ?? [];
   const isAllComplete =
     agentStep >= AGENTS.length - 1 && completedAgents.has(AGENTS[AGENTS.length - 1].key);
@@ -942,6 +955,17 @@ function CasePage() {
       if (ftaAutoSaveTimer.current) clearTimeout(ftaAutoSaveTimer.current);
     };
   }, [faultTree, convId]);
+
+  // Auto-save incident data fields (2s debounce, silent — no toast)
+  const incidentAutoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!isDirty || editLocked || currentAgent?.key !== "data_collector" || !convId) return;
+    if (incidentAutoSaveTimer.current) clearTimeout(incidentAutoSaveTimer.current);
+    incidentAutoSaveTimer.current = setTimeout(() => {
+      saveCollectorMut.mutate({ silent: true });
+    }, 2000);
+    return () => { if (incidentAutoSaveTimer.current) clearTimeout(incidentAutoSaveTimer.current); };
+  }, [editProblemStatement, editEffect, editEquipmentName, editLocation, editOperatingConditions, editTimestamp, editWitnessedSymptoms, editGaps, editFollowUps, isDirty]);
 
   // Auto scroll 5 Why investigation workspace when new questions stream or are added
   const stepsCount = messages.filter((m: any) => m.role === "assistant").length;
@@ -1624,7 +1648,9 @@ function CasePage() {
                   onClick={() => saveCollectorMut.mutate({})}
                   disabled={editLocked || saveCollectorMut.isPending}
                 >
-                  {saveCollectorMut.isPending ? "Saving..." : "Save Draft"}
+                  {saveCollectorMut.isPending ? (
+                    <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Saving…</>
+                  ) : isDirty ? "Save Draft*" : "Save Draft"}
                 </Button>
               </div>
             </div>
@@ -2038,16 +2064,22 @@ function CasePage() {
                                   title="Change just this answer without clearing later steps"
                                   onClick={() => {
                                     const raw = step.selectedAnswer;
-                                    // Pre-populate edit selection from existing answer
-                                    const m = raw.match(/^I select (cause-[^:]+):/);
-                                    if (m) {
-                                      setEditCauseId(m[1]);
-                                      setEditCustomText("");
+                                    setEditCauseId(""); setEditCauseIds([]); setEditCustomText("");
+                                    if (idx === 0 && raw.startsWith("Multiple root causes")) {
+                                      // Parse multi-cause selections back to IDs
+                                      const lines = raw.split("\n").slice(1).map((l: string) => l.replace(/^- /, "").trim());
+                                      const ids = step.possibleCauses.filter((c: any) => lines.includes(c.description)).map((c: any) => c.id);
+                                      setEditCauseIds(ids.length > 0 ? ids : []);
                                     } else {
-                                      const text = raw.replace(/^I select (the )?/, "").replace(/\.$/, "").trim();
-                                      const found = step.possibleCauses.find((c: any) => c.description === text);
-                                      setEditCauseId(found ? found.id : "custom");
-                                      setEditCustomText(found ? "" : text);
+                                      const m = raw.match(/^I select (cause-[^:]+):/);
+                                      if (m) {
+                                        if (idx === 0) setEditCauseIds([m[1]]); else setEditCauseId(m[1]);
+                                      } else {
+                                        const text = raw.replace(/^I select (the )?/, "").replace(/\.$/, "").trim();
+                                        const found = step.possibleCauses.find((c: any) => c.description === text);
+                                        if (idx === 0) setEditCauseIds(found ? [found.id] : []);
+                                        else { setEditCauseId(found ? found.id : "custom"); setEditCustomText(found ? "" : text); }
+                                      }
                                     }
                                     setEditingStepIdx(idx);
                                   }}
@@ -2081,19 +2113,29 @@ function CasePage() {
                         ) : step.selectedAnswer && editingStepIdx === idx ? (
                           <div className="space-y-3 border border-blue-500/30 rounded-md p-3 bg-blue-500/5">
                             <div className="flex items-center justify-between">
-                              <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-wider">EDIT THIS ANSWER (keeps later steps intact)</span>
-                              <button onClick={() => setEditingStepIdx(null)} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕ Cancel</button>
+                              <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-wider">
+                                EDIT THIS ANSWER {idx === 0 ? "(multi-select allowed for Why 1)" : "(keeps later steps intact)"}
+                              </span>
+                              <button onClick={() => { setEditingStepIdx(null); setEditCauseId(""); setEditCauseIds([]); setEditCustomText(""); }} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕ Cancel</button>
                             </div>
                             <div className="grid gap-2">
                               {step.possibleCauses.map((cause: any) => {
-                                const isSelected = editCauseId === cause.id;
+                                const isMultiEdit = idx === 0;
+                                const isSelected = isMultiEdit ? editCauseIds.includes(cause.id) : editCauseId === cause.id;
                                 return (
                                   <button key={cause.id} type="button"
-                                    onClick={() => { setEditCauseId(cause.id); setEditCustomText(""); }}
+                                    onClick={() => {
+                                      if (isMultiEdit) {
+                                        setEditCauseIds(prev => prev.includes(cause.id) ? prev.filter(x => x !== cause.id) : [...prev, cause.id]);
+                                        setEditCauseId("");
+                                      } else {
+                                        setEditCauseId(cause.id); setEditCustomText("");
+                                      }
+                                    }}
                                     className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
                                   >
-                                    <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-blue-500" : "border-muted-foreground/30"}`}>
-                                      {isSelected && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                    <div className={`${idx === 0 ? "w-4 h-4 rounded border" : "w-4 h-4 rounded-full border"} flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-blue-500 bg-blue-500/20" : "border-muted-foreground/30"}`}>
+                                      {isSelected && (idx === 0 ? <span className="text-blue-400 text-[10px] font-bold">✓</span> : <div className="w-2 h-2 rounded-full bg-blue-500" />)}
                                     </div>
                                     <div className="flex-1 space-y-1">
                                       <div className="flex items-center gap-2">
@@ -2106,7 +2148,7 @@ function CasePage() {
                                 );
                               })}
                               <button type="button"
-                                onClick={() => setEditCauseId("custom")}
+                                onClick={() => { setEditCauseId("custom"); setEditCauseIds([]); }}
                                 className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${editCauseId === "custom" ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
                               >
                                 <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${editCauseId === "custom" ? "border-blue-500" : "border-muted-foreground/30"}`}>
@@ -2132,13 +2174,22 @@ function CasePage() {
                             )}
                             <div className="flex gap-2 pt-1">
                               <button
-                                disabled={!editCauseId || (editCauseId === "custom" && !editCustomText.trim())}
+                                disabled={
+                                  idx === 0
+                                    ? editCauseIds.length === 0 && editCauseId !== "custom"
+                                    : (!editCauseId || (editCauseId === "custom" && !editCustomText.trim()))
+                                }
                                 onClick={async () => {
                                   if (!convId || !step.userMessageId) return;
                                   let answerText = "";
                                   if (editCauseId === "custom") {
                                     if (!editCustomText.trim()) { toast.error("Please enter a custom explanation."); return; }
                                     answerText = `I select the ${editCustomText.trim()}.`;
+                                  } else if (idx === 0 && editCauseIds.length > 0) {
+                                    const causes = step.possibleCauses.filter((c: any) => editCauseIds.includes(c.id));
+                                    answerText = causes.length === 1
+                                      ? `I select ${causes[0].id}: ${causes[0].description}`
+                                      : `Multiple root causes identified:\n${causes.map((c: any) => `- ${c.description}`).join("\n")}`;
                                   } else {
                                     const cause = step.possibleCauses.find((c: any) => c.id === editCauseId);
                                     if (cause) answerText = `I select ${cause.id}: ${cause.description}`;
@@ -2146,7 +2197,7 @@ function CasePage() {
                                   if (!answerText) { toast.error("Please select a cause."); return; }
                                   try {
                                     await updateUserMsgFn({ data: { conversationId: convId, messageId: step.userMessageId, content: answerText } });
-                                    setEditingStepIdx(null);
+                                    setEditingStepIdx(null); setEditCauseId(""); setEditCauseIds([]); setEditCustomText("");
                                     qc.invalidateQueries({ queryKey: ["msgs", convId] });
                                     toast.success("Answer updated!");
                                   } catch {
@@ -6264,7 +6315,7 @@ function CasePage() {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-7rem)] gap-3 animate-fadeIn">
+    <div className={`flex flex-col gap-3 animate-fadeIn ${isFullscreen ? "h-screen fixed inset-0 z-[100] bg-background p-3 overflow-hidden" : "h-[calc(100vh-7rem)]"}`}>
       {renderAutoModal()}
 
       {/* ── Share / Make Public Overlay ───────────────────────────────────── */}
@@ -6336,16 +6387,26 @@ function CasePage() {
 
       {/* ── Collaborators Dialog ──────────────────────────────────────────── */}
       {showCollabDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowCollabDialog(false)}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => { setShowCollabDialog(false); setCollabSearch(""); }}>
           <div className="bg-background border border-border rounded-xl max-w-lg w-full mx-4 shadow-2xl flex flex-col max-h-[85vh]" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between p-4 border-b border-border/60">
               <div className="flex items-center gap-2">
                 <Users className="w-4 h-4 text-primary" />
                 <h3 className="font-bold text-sm">Collaborators</h3>
               </div>
-              <button onClick={() => setShowCollabDialog(false)} className="text-muted-foreground hover:text-foreground">
+              <button onClick={() => { setShowCollabDialog(false); setCollabSearch(""); }} className="text-muted-foreground hover:text-foreground">
                 <XCircle className="w-4 h-4" />
               </button>
+            </div>
+            {/* Search bar */}
+            <div className="px-4 pt-3 pb-1">
+              <input
+                type="text"
+                value={collabSearch}
+                onChange={e => setCollabSearch(e.target.value)}
+                placeholder="Search by name or email…"
+                className="w-full text-xs p-2 bg-secondary/30 border border-border/50 rounded-lg focus:border-primary/50 focus:outline-none"
+              />
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {/* Current collaborators */}
@@ -6353,11 +6414,11 @@ function CasePage() {
                 <p className="text-[10px] text-muted-foreground font-mono uppercase font-semibold">Current Collaborators</p>
                 {collabQ.isLoading ? (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground"><Loader2 className="w-3 h-3 animate-spin" /> Loading…</div>
-                ) : (collabQ.data?.collaborators ?? []).length === 0 ? (
-                  <p className="text-xs text-muted-foreground italic">No collaborators yet. Add users below.</p>
+                ) : (collabQ.data?.collaborators ?? []).filter((c) => !collabSearch || (c.full_name || c.email).toLowerCase().includes(collabSearch.toLowerCase())).length === 0 ? (
+                  <p className="text-xs text-muted-foreground italic">{collabSearch ? "No matching collaborators." : "No collaborators yet. Add users below."}</p>
                 ) : (
                   <div className="space-y-1.5">
-                    {(collabQ.data?.collaborators ?? []).map((c) => (
+                    {(collabQ.data?.collaborators ?? []).filter((c) => !collabSearch || (c.full_name || c.email).toLowerCase().includes(collabSearch.toLowerCase())).map((c) => (
                       <div key={c.user_id} className="flex items-center justify-between p-2.5 rounded-lg border border-border/50 bg-secondary/20">
                         <div className="min-w-0">
                           <p className="text-xs font-medium truncate">{c.full_name || c.email}</p>
@@ -6388,10 +6449,10 @@ function CasePage() {
                   ) : (
                     <>
                       {/* Accepted users */}
-                      {(usersForCollabQ.data?.accepted ?? []).length > 0 ? (
+                      {(usersForCollabQ.data?.accepted ?? []).filter((u) => !collabSearch || (u.full_name || u.email).toLowerCase().includes(collabSearch.toLowerCase())).length > 0 ? (
                         <div className="space-y-1.5 max-h-48 overflow-y-auto">
                           <p className="text-[9px] text-muted-foreground font-mono">ACCEPTED USERS</p>
-                          {(usersForCollabQ.data?.accepted ?? []).map((u) => (
+                          {(usersForCollabQ.data?.accepted ?? []).filter((u) => !collabSearch || (u.full_name || u.email).toLowerCase().includes(collabSearch.toLowerCase())).map((u) => (
                             <div key={u.id} className="flex items-center justify-between p-2 rounded border border-border/40 bg-background/50 hover:bg-secondary/20">
                               <div className="min-w-0">
                                 <p className="text-xs font-medium truncate">{u.full_name || u.email}</p>
@@ -6506,6 +6567,15 @@ function CasePage() {
             <Badge variant="outline" className="text-xs mono">
               {completedAgents.size + skippedAgents.size}/{AGENTS.length} steps
             </Badge>
+            {/* Fullscreen button */}
+            <button
+              onClick={toggleFullscreen}
+              className="h-6 px-2 rounded text-[10px] font-mono flex items-center gap-1 border border-border/60 bg-secondary/30 hover:bg-secondary/60 text-muted-foreground hover:text-foreground transition-colors"
+              title={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            >
+              {isFullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+              <span className="hidden sm:inline">{isFullscreen ? "Exit" : "Fullscreen"}</span>
+            </button>
             {/* History button */}
             <button
               onClick={() => setShowHistoryPanel(true)}
@@ -6555,13 +6625,12 @@ function CasePage() {
             const isSkipped = skippedAgents.has(agent.key);
             const isCurrent = idx === agentStep;
             const isFuture = idx > agentStep;
+            const collectorDone = editLocked || completedAgents.has("data_collector");
             const isClickable =
               idx <= agentStep ||
               isComplete ||
               isSkipped ||
-              (idx === agentStep + 1 &&
-                (completedAgents.has(currentAgent?.key || "") ||
-                  (currentAgent?.key === "data_collector" && editLocked)));
+              collectorDone;
 
             return (
               <div key={agent.key} className="flex items-center shrink-0">
@@ -6627,13 +6696,12 @@ function CasePage() {
                 const isSelected = idx === agentStep;
                 const isCompleted = completedAgents.has(a.key);
                 const isSkipped = skippedAgents.has(a.key);
+                const collectorDoneSidebar = editLocked || completedAgents.has("data_collector");
                 const isClickable =
                   idx <= agentStep ||
                   isCompleted ||
                   isSkipped ||
-                  (idx === agentStep + 1 &&
-                    (completedAgents.has(currentAgent?.key || "") ||
-                      (currentAgent?.key === "data_collector" && editLocked)));
+                  collectorDoneSidebar;
 
                 return (
                   <button

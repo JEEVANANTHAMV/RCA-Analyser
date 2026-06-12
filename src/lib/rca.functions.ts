@@ -8,12 +8,12 @@ import path from "path";
 
 const AGENT_KEYS = [
   "data_collector",
+  "timeline",
+  "equipment",
   "five_why",
   "fishbone",
   "fault_tree",
   "pareto",
-  "timeline",
-  "equipment",
   "report",
 ] as const;
 
@@ -491,8 +491,28 @@ function buildDataCollectorQuestion(rcaCase: CaseRow): string {
     .join("\n");
 }
 
-function buildFiveWhyQuestion(rcaCase: CaseRow): string {
+function buildFiveWhyQuestion(
+  db: ReturnType<typeof getDb>,
+  caseId: string,
+  rcaCase: CaseRow,
+): string {
   const f = parseIncidentFields(rcaCase);
+  const tlMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
+  const eqMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
   return [
     `Problem Statement: ${f.problemStatement || f.description}`,
     `Operational Effect: ${f.effect}`,
@@ -501,15 +521,40 @@ function buildFiveWhyQuestion(rcaCase: CaseRow): string {
     `Operating Conditions: ${f.operatingConditions}`,
     `Failure Timestamp: ${f.timestamp}`,
     `Witnessed Symptoms: ${f.witnessedSymptoms}`,
+    tlMsg?.content ? `\nTimeline Analysis:\n${tlMsg.content}` : "",
+    eqMsg?.content ? `\nEquipment Analysis:\n${eqMsg.content}` : "",
     "",
     // NOTE: the literal phrase "START FRESH 5 WHY ANALYSIS" is a marker the UI greps for
     // to anchor a fresh 5-Why session in the message history. Do not reword it.
     "START FRESH 5 WHY ANALYSIS. Generate only WHY STEP 1 — the first question.",
-  ].join("\n");
+  ]
+    .filter((x) => x !== "")
+    .join("\n");
 }
 
-function buildFishboneQuestion(rcaCase: CaseRow, fiveWhySummary: string): string {
+function buildFishboneQuestion(
+  db: ReturnType<typeof getDb>,
+  caseId: string,
+  rcaCase: CaseRow,
+  fiveWhySummary: string,
+): string {
   const f = parseIncidentFields(rcaCase);
+  const tlMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
+  const eqMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
   return [
     `Incident Title: ${f.title}`,
     `Problem Statement: ${f.problemStatement || f.description}`,
@@ -519,18 +564,114 @@ function buildFishboneQuestion(rcaCase: CaseRow, fiveWhySummary: string): string
     `Operating Conditions: ${f.operatingConditions}`,
     `Failure Timestamp: ${f.timestamp}`,
     `Witnessed Symptoms: ${f.witnessedSymptoms}`,
+    tlMsg?.content ? `\nTimeline Analysis:\n${tlMsg.content}` : "",
+    eqMsg?.content ? `\nEquipment Analysis:\n${eqMsg.content}` : "",
     "",
     `Preceding 5-Why Findings:\n${fiveWhySummary || "(none yet)"}`,
     "",
     "Begin with STEP 1.",
-  ].join("\n");
+  ]
+    .filter((x) => x !== "")
+    .join("\n");
+}
+
+// Build prompt for the Timeline agent (runs right after data_collector).
+// Uses the full Q&A from data_collector plus all incident fields from the case.
+function buildTimelineQuestion(
+  db: ReturnType<typeof getDb>,
+  caseId: string,
+  rcaCase: CaseRow,
+): string {
+  const f = parseIncidentFields(rcaCase);
+  const dcMsgs = db
+    .prepare(
+      `SELECT m.role, m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector'
+       ORDER BY m.created_at ASC`,
+    )
+    .all(caseId) as { role: string; content: string }[];
+  const parts = [
+    "INCIDENT DATA:",
+    `Problem Statement: ${f.problemStatement || f.description || "(not recorded)"}`,
+    `Equipment: ${f.equipmentName || "(not recorded)"}`,
+    `Location: ${f.location || "(not recorded)"}`,
+    `Failure Timestamp: ${f.timestamp || "(not recorded)"}`,
+    `Operating Conditions: ${f.operatingConditions || "(not recorded)"}`,
+    `Witnessed Symptoms: ${f.witnessedSymptoms || "(not recorded)"}`,
+    `Operational Effect: ${f.effect || "(not recorded)"}`,
+  ];
+  if (f.attachments) parts.push(`Attached Documents: ${f.attachments}`);
+  if (f.followUps.length)
+    parts.push(
+      `\nSuggested Investigative Follow-ups:\n${f.followUps.map((x) => `- ${x}`).join("\n")}`,
+    );
+  const realMsgs = dcMsgs.filter(
+    (m) => m.content && m.content !== "[Auto-Pipeline Hypothesis Generation Request]",
+  );
+  if (realMsgs.length) {
+    parts.push("\nDATA COLLECTION Q&A (operator-confirmed findings):");
+    for (const m of realMsgs)
+      parts.push(`[${m.role === "user" ? "Operator" : "Data Collector"}]: ${m.content}`);
+  }
+  parts.push(`
+TASK: Reconstruct the precise incident timeline.
+STRICT RULES:
+- Include ONLY events documented above — timestamps, symptoms, operator observations, facts from the Q&A.
+- If a specific clock time is not documented, use relative terms ("Shortly before failure", "At time of failure") — never invent clock times.
+- Do NOT invent events, sequences, or timestamps not evidenced in the data above.
+- If an event's timing is estimated, flag it explicitly as "Estimated".
+- If insufficient data exists for a timeline entry, omit it entirely rather than guess.`);
+  return parts.join("\n");
+}
+
+// Build prompt for the Equipment agent (runs after timeline, before 5-Why).
+function buildEquipmentQuestion(
+  db: ReturnType<typeof getDb>,
+  caseId: string,
+  rcaCase: CaseRow,
+): string {
+  const f = parseIncidentFields(rcaCase);
+  const dcMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
+  const tlMsg = db
+    .prepare(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+    )
+    .get(caseId) as { content: string } | undefined;
+  const parts = [
+    "INCIDENT DATA:",
+    `Equipment Name/Tag: ${f.equipmentName || "(not recorded)"}`,
+    `Location: ${f.location || "(not recorded)"}`,
+    `Operating Conditions at Failure: ${f.operatingConditions || "(not recorded)"}`,
+    `Problem Statement: ${f.problemStatement || f.description || "(not recorded)"}`,
+    `Operational Effect: ${f.effect || "(not recorded)"}`,
+  ];
+  if (f.attachments) parts.push(`Attached Documents: ${f.attachments}`);
+  if (dcMsg?.content) parts.push(`\nDATA COLLECTION FINDINGS:\n${dcMsg.content}`);
+  if (tlMsg?.content) parts.push(`\nTIMELINE ANALYSIS:\n${tlMsg.content}`);
+  parts.push(`
+TASK: Derive reliability metrics and RPN risk scores for the equipment involved.
+STRICT RULES:
+- Base ALL metrics on documented data above only.
+- For values not available (MTBF, MTTR, failure history), state "Not documented" — do not estimate.
+- RPN scores must reference actual severity/occurrence/detection from the data; if unavailable, mark as "Estimated" and explain the basis.
+- Do NOT fabricate maintenance history dates or past failure counts.`);
+  return parts.join("\n");
 }
 
 const STRUCTURED_TASK_LINES: Record<string, string> = {
   fault_tree: "Using the findings above, construct the fault tree for this incident.",
   pareto: "Identify and rank all failure modes from the findings above.",
-  timeline: "Reconstruct the incident timeline using all known timestamps, symptoms, and findings above.",
-  equipment: "Derive the reliability metrics and RPN risk scores for the equipment involved in this incident.",
   report: `Synthesise all findings above into the complete RCA report JSON.
 CRITICAL RULE — DO NOT INVENT DATA: For any field you cannot reliably determine from the analysis (e.g. SAP notification numbers, team member names, actual rupee cost figures, PM/CBM dates, last failure history), set the value to null and add an entry to the "pendingQuestions" array instead.
 The "pendingQuestions" array must list every field you could not fill with real data:
@@ -566,6 +707,73 @@ function buildPriorFindingsQuestion(
   }
   q += "\n" + (STRUCTURED_TASK_LINES[agentKey] || `Perform your analysis for ${AGENT_BY_KEY[agentKey as AgentKey]?.name}.`);
   return q;
+}
+
+// Build a comprehensive summary of the 5-Why chain to pass to the Fishbone agent.
+// Gets all five_why messages (assistant + user) in ascending order and reconstructs each step.
+function buildFiveWhySummary(db: ReturnType<typeof getDb>, caseId: string): string {
+  const allMsgs = db
+    .prepare(
+      `SELECT m.role, m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = 'five_why'
+       ORDER BY m.created_at ASC`,
+    )
+    .all(caseId) as { role: string; content: string }[];
+
+  if (!allMsgs.length) return "";
+
+  const stepSummaries: string[] = [];
+  let finalRootCause = "";
+
+  for (let i = 0; i < allMsgs.length; i++) {
+    const msg = allMsgs[i];
+    if (msg.role !== "assistant") continue;
+
+    try {
+      const parsed = JSON.parse(msg.content);
+      if (!parsed || (!parsed.question && !parsed.whyStep)) continue;
+
+      const stepNum = parsed.whyStep ?? stepSummaries.length + 1;
+      const lines: string[] = [`WHY STEP ${stepNum}: ${parsed.question || ""}`];
+
+      // Operator's selected cause is in the next user message
+      const nextMsg = allMsgs[i + 1];
+      if (nextMsg?.role === "user") {
+        let answer = nextMsg.content.trim();
+        // Normalize "I select cause-X: description" → just description
+        if (answer.startsWith("I select ")) {
+          const rest = answer.slice(9);
+          const colonIdx = rest.indexOf(":");
+          answer = colonIdx !== -1 ? rest.slice(colonIdx + 1).trim() : rest;
+        }
+        lines.push(`  Selected Cause: ${answer}`);
+      }
+
+      if (parsed.possibleCauses?.length) {
+        const causeList = parsed.possibleCauses
+          .map((c: any) => `    - [${c.id}] ${c.description}`)
+          .join("\n");
+        lines.push(`  Possible Causes Presented:\n${causeList}`);
+      }
+
+      if (parsed.operatorInstruction) {
+        lines.push(`  Context / Instruction: ${parsed.operatorInstruction}`);
+      }
+
+      stepSummaries.push(lines.join("\n"));
+
+      if (parsed.finalRootCause) finalRootCause = parsed.finalRootCause;
+      if (!finalRootCause && parsed.rootCause) finalRootCause = parsed.rootCause;
+    } catch {
+      // skip non-JSON assistant messages
+    }
+  }
+
+  if (!stepSummaries.length) return "";
+  let summary = stepSummaries.join("\n\n");
+  if (finalRootCause) summary += `\n\nFINAL ROOT CAUSE IDENTIFIED: ${finalRootCause}`;
+  return summary;
 }
 
 export const sendAgentMessage = createServerFn({ method: "POST" })
@@ -1201,41 +1409,22 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
     const currentIdx = AGENT_KEYS.indexOf(data.agentKey);
     let prompt = "";
 
+    const rcaCase = db
+      .prepare("SELECT * FROM rca_cases WHERE id = ?")
+      .get(data.caseId) as CaseRow | undefined;
+    if (!rcaCase) throw new Error("Case not found");
+
     if (data.agentKey === "data_collector") {
-      const rcaCase = db
-        .prepare("SELECT * FROM rca_cases WHERE id = ?")
-        .get(data.caseId) as CaseRow | undefined;
-      if (!rcaCase) throw new Error("Case not found");
       prompt = buildDataCollectorQuestion(rcaCase);
+    } else if (data.agentKey === "timeline") {
+      prompt = buildTimelineQuestion(db, data.caseId, rcaCase);
+    } else if (data.agentKey === "equipment") {
+      prompt = buildEquipmentQuestion(db, data.caseId, rcaCase);
     } else if (data.agentKey === "five_why") {
-      const rcaCase = db
-        .prepare("SELECT * FROM rca_cases WHERE id = ?")
-        .get(data.caseId) as CaseRow | undefined;
-      if (!rcaCase) throw new Error("Case not found");
-      prompt = buildFiveWhyQuestion(rcaCase);
+      prompt = buildFiveWhyQuestion(db, data.caseId, rcaCase);
     } else if (data.agentKey === "fishbone") {
-      const rcaCase = db
-        .prepare("SELECT * FROM rca_cases WHERE id = ?")
-        .get(data.caseId) as CaseRow | undefined;
-      if (!rcaCase) throw new Error("Case not found");
-      let fiveWhySummary = "";
-      const lastWhy = db
-        .prepare(
-          `SELECT m.content FROM messages m
-           INNER JOIN conversations c ON c.id = m.conversation_id
-           WHERE c.rca_case_id = ? AND c.agent_key = 'five_why' AND m.role = 'assistant'
-           ORDER BY m.created_at DESC LIMIT 1`,
-        )
-        .get(data.caseId) as { content: string } | undefined;
-      if (lastWhy) {
-        try {
-          const pw = JSON.parse(lastWhy.content);
-          fiveWhySummary = `Question: ${pw.question || ""}\nOperator Instruction: ${pw.operatorInstruction || ""}`;
-        } catch {
-          fiveWhySummary = lastWhy.content;
-        }
-      }
-      prompt = buildFishboneQuestion(rcaCase, fiveWhySummary);
+      const fiveWhySummary = buildFiveWhySummary(db, data.caseId);
+      prompt = buildFishboneQuestion(db, data.caseId, rcaCase, fiveWhySummary);
     } else {
       prompt = buildPriorFindingsQuestion(db, data.caseId, data.agentKey, currentIdx);
     }
@@ -1251,7 +1440,7 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
     // Structured single-shot agents must not inherit stale session history from prior runs.
     // Give them a fresh chatId every time; conversation agents (data_collector, five_why, fishbone)
     // keep the shared collector session so context flows between turns.
-    const STRUCTURED_AGENTS = ["fault_tree", "pareto", "timeline", "equipment", "report"];
+    const STRUCTURED_AGENTS = ["timeline", "equipment", "fault_tree", "pareto", "report"];
     let chatId: string;
     if (STRUCTURED_AGENTS.includes(data.agentKey)) {
       chatId = `${convo.session_id}-${generateId()}`;
@@ -1464,6 +1653,12 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
       effect: data.effect || "",
       gaps: data.gaps || [],
       followUps: data.followUps || [],
+      equipmentName: data.equipmentName || "",
+      location: data.location || "",
+      operatingConditions: data.operatingConditions || "",
+      timestamp: data.timestamp || "",
+      witnessedSymptoms: data.witnessedSymptoms || "",
+      maintenanceHistoryChecked: !!data.maintenanceHistoryChecked,
     };
 
     const newContentStr = JSON.stringify(newContentObj, null, 2);
@@ -1781,7 +1976,7 @@ export const runFullAutomation = createServerFn({ method: "POST" })
 
             if (agentKey === "data_collector") collectorSessionId = convo.session_id;
             // Structured single-shot agents get a fresh chatId to avoid stale session contamination.
-            const STRUCTURED_AGENTS_FA = ["fault_tree", "pareto", "timeline", "equipment", "report"];
+            const STRUCTURED_AGENTS_FA = ["timeline", "equipment", "fault_tree", "pareto", "report"];
             const chatId = STRUCTURED_AGENTS_FA.includes(agentKey)
               ? `${convo.session_id}-${generateId()}`
               : (collectorSessionId ?? convo.session_id);
@@ -1804,27 +1999,15 @@ export const runFullAutomation = createServerFn({ method: "POST" })
 
             if (agentKey === "data_collector") {
               prompt = buildDataCollectorQuestion(rcaCase);
+            } else if (agentKey === "timeline") {
+              prompt = buildTimelineQuestion(db, data.caseId, rcaCase);
+            } else if (agentKey === "equipment") {
+              prompt = buildEquipmentQuestion(db, data.caseId, rcaCase);
             } else if (agentKey === "five_why") {
-              prompt = buildFiveWhyQuestion(rcaCase);
+              prompt = buildFiveWhyQuestion(db, data.caseId, rcaCase);
             } else if (agentKey === "fishbone") {
-              let fiveWhySummary = "";
-              const fwLastMsg = db
-                .prepare(
-                  `SELECT m.content FROM messages m
-                   INNER JOIN conversations c ON c.id = m.conversation_id
-                   WHERE c.rca_case_id = ? AND c.agent_key = 'five_why' AND m.role = 'assistant'
-                   ORDER BY m.created_at DESC LIMIT 1`,
-                )
-                .get(data.caseId) as { content: string } | undefined;
-              if (fwLastMsg) {
-                try {
-                  const pw = JSON.parse(fwLastMsg.content);
-                  fiveWhySummary = `Question: ${pw.question || ""}\nInstruction: ${pw.operatorInstruction || ""}`;
-                } catch {
-                  fiveWhySummary = fwLastMsg.content;
-                }
-              }
-              prompt = buildFishboneQuestion(rcaCase, fiveWhySummary);
+              const fiveWhySummary = buildFiveWhySummary(db, data.caseId);
+              prompt = buildFishboneQuestion(db, data.caseId, rcaCase, fiveWhySummary);
             } else {
               prompt = buildPriorFindingsQuestion(db, data.caseId, agentKey, currentIdx);
             }
