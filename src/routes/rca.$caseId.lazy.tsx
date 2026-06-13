@@ -1113,7 +1113,7 @@ function CasePage() {
         if (m.role !== "assistant") return false;
         try {
           const parsed = parseMaybeJson(m.content);
-          return parsed && (parsed.question || parsed.whyStep);
+          return parsed && (parsed.question || parsed.why || parsed.whyQuestion || parsed.whyStep);
         } catch { return false; }
       });
       return (hypothesisMut.isPending || isStreaming) && !hasAnyWhy;
@@ -1285,7 +1285,7 @@ function CasePage() {
           if (m.role === "assistant") {
             try {
               const parsed = parseMaybeJson(m.content);
-              if (parsed && (parsed.question || parsed.whyStep)) {
+              if (parsed && (parsed.question || parsed.why || parsed.whyQuestion || parsed.whyStep)) {
                 let selected = "";
                 const nextMsg = sessionMsgs[i + 1];
                 if (nextMsg && nextMsg.role === "user") {
@@ -1293,7 +1293,7 @@ function CasePage() {
                 }
                 intSteps.push({
                   stepNumber: parsed.whyStep ? (parsed.whyStep - 1) : (intSteps.length + 1),
-                  question: parsed.question || "",
+                  question: parsed.question || parsed.why || parsed.whyQuestion || "",
                   possibleCauses: parsed.possibleCauses || [],
                   selectedAnswer: selected,
                 });
@@ -2089,7 +2089,7 @@ function CasePage() {
             if (m.role === "assistant") {
               try {
                 const parsed = parseMaybeJson(m.content);
-                if (parsed && (parsed.question || parsed.whyStep)) {
+                if (parsed && (parsed.question || parsed.why || parsed.whyQuestion || parsed.whyStep)) {
                   let selected = "";
                   const nextMsg = sessionMsgs[i + 1];
                   if (nextMsg && nextMsg.role === "user") {
@@ -2097,7 +2097,7 @@ function CasePage() {
                   }
                   interactiveSteps.push({
                     stepNumber: parsed.whyStep ? (parsed.whyStep - 1) : (interactiveSteps.length + 1),
-                    question: parsed.question || "",
+                    question: parsed.question || parsed.why || parsed.whyQuestion || "",
                     possibleCauses: parsed.possibleCauses || [],
                     operatorInstruction: parsed.operatorInstruction || "",
                     selectedAnswer: selected,
@@ -2116,12 +2116,12 @@ function CasePage() {
 
         if (isStreamingActive && activeStreamText) {
           streamingParsed = parseMaybeJson(activeStreamText);
-          if (streamingParsed && (streamingParsed.question || streamingParsed.whyStep)) {
+          if (streamingParsed && (streamingParsed.question || streamingParsed.why || streamingParsed.whyQuestion || streamingParsed.whyStep)) {
             const stepNum = streamingParsed.whyStep ? (streamingParsed.whyStep - 1) : (interactiveSteps.length + 1);
             const existingIdx = interactiveSteps.findIndex(s => s.stepNumber === stepNum);
             const streamingStep = {
               stepNumber: stepNum,
-              question: streamingParsed.question || "Generating next question...",
+              question: streamingParsed.question || streamingParsed.why || streamingParsed.whyQuestion || "Generating next question...",
               possibleCauses: streamingParsed.possibleCauses || [],
               operatorInstruction: streamingParsed.operatorInstruction || "",
               selectedAnswer: "",
@@ -2137,15 +2137,15 @@ function CasePage() {
 
         const currentStep = interactiveSteps.find(s => !s.selectedAnswer);
 
-        const isFirstStep = interactiveSteps.indexOf(currentStep) === 0;
         const ftaAgentIdx = AGENTS.findIndex(a => a.key === "fault_tree");
+        const hadMultipleCauses = interactiveSteps.some(s => s.selectedAnswer?.startsWith("Multiple root causes identified:"));
 
         const submitResponse = () => {
           if (!currentStep) return;
           let answerText = "";
           let isMultiCause = false;
 
-          if (isFirstStep && selectedCauseIds.length > 0) {
+          if (selectedCauseIds.length > 0) {
             const selectedCauses = currentStep.possibleCauses.filter((c: any) =>
               selectedCauseIds.includes(c.id)
             );
@@ -2160,17 +2160,6 @@ function CasePage() {
             answerText = selectedCauses.length === 1
               ? `I select ${selectedCauses[0].id}: ${selectedCauses[0].description}`
               : `Multiple root causes identified:\n${selectedCauses.map((c: any) => `- ${c.description}`).join("\n")}`;
-          } else if (selectedCauseId === "custom") {
-            if (!customCauseText.trim()) {
-              toast.error("Please enter a custom explanation.");
-              return;
-            }
-            answerText = `I select the ${customCauseText.trim()}.`;
-          } else if (selectedCauseId) {
-            const cause = currentStep.possibleCauses.find((c: any) => c.id === selectedCauseId);
-            if (cause) {
-              answerText = `I select ${cause.id}: ${cause.description}`;
-            }
           }
 
           if (!answerText) {
@@ -2184,9 +2173,8 @@ function CasePage() {
               setSelectedCauseIds([]);
               setCustomCauseText("");
               qc.invalidateQueries({ queryKey: ["msgs", convId] });
-              if (isMultiCause && ftaAgentIdx !== -1) {
-                toast.info("Multiple causes detected — navigating to Fault Tree Analysis");
-                setTimeout(() => goToAgent(ftaAgentIdx), 800);
+              if (isMultiCause) {
+                toast.info("Multiple causes recorded — complete the 5-Why chain, then proceed to Fault Tree Analysis");
               }
             }
           });
@@ -2282,20 +2270,23 @@ function CasePage() {
                                   onClick={() => {
                                     const raw = step.selectedAnswer;
                                     setEditCauseId(""); setEditCauseIds([]); setEditCustomText("");
-                                    if (idx === 0 && raw.startsWith("Multiple root causes")) {
-                                      // Parse multi-cause selections back to IDs
+                                    if (raw.startsWith("Multiple root causes")) {
                                       const lines = raw.split("\n").slice(1).map((l: string) => l.replace(/^- /, "").trim());
                                       const ids = step.possibleCauses.filter((c: any) => lines.includes(c.description)).map((c: any) => c.id);
                                       setEditCauseIds(ids.length > 0 ? ids : []);
                                     } else {
                                       const m = raw.match(/^I select (cause-[^:]+):/);
                                       if (m) {
-                                        if (idx === 0) setEditCauseIds([m[1]]); else setEditCauseId(m[1]);
+                                        setEditCauseIds([m[1]]);
                                       } else {
                                         const text = raw.replace(/^I select (the )?/, "").replace(/\.$/, "").trim();
                                         const found = step.possibleCauses.find((c: any) => c.description === text);
-                                        if (idx === 0) setEditCauseIds(found ? [found.id] : []);
-                                        else { setEditCauseId(found ? found.id : "custom"); setEditCustomText(found ? "" : text); }
+                                        if (found) {
+                                          setEditCauseIds([found.id]);
+                                        } else {
+                                          setEditCauseIds(["custom"]);
+                                          setEditCustomText(text);
+                                        }
                                       }
                                     }
                                     setEditingStepIdx(idx);
@@ -2331,28 +2322,22 @@ function CasePage() {
                           <div className="space-y-3 border border-blue-500/30 rounded-md p-3 bg-blue-500/5">
                             <div className="flex items-center justify-between">
                               <span className="text-[10px] font-mono font-bold text-blue-400 uppercase tracking-wider">
-                                EDIT THIS ANSWER {idx === 0 ? "(multi-select allowed for Why 1)" : "(keeps later steps intact)"}
+                                EDIT THIS ANSWER (multi-select — keeps later steps intact)
                               </span>
                               <button onClick={() => { setEditingStepIdx(null); setEditCauseId(""); setEditCauseIds([]); setEditCustomText(""); }} className="text-muted-foreground hover:text-foreground text-xs font-mono">✕ Cancel</button>
                             </div>
                             <div className="grid gap-2">
                               {step.possibleCauses.map((cause: any) => {
-                                const isMultiEdit = idx === 0;
-                                const isSelected = isMultiEdit ? editCauseIds.includes(cause.id) : editCauseId === cause.id;
+                                const isSelected = editCauseIds.includes(cause.id);
                                 return (
                                   <button key={cause.id} type="button"
                                     onClick={() => {
-                                      if (isMultiEdit) {
-                                        setEditCauseIds(prev => prev.includes(cause.id) ? prev.filter(x => x !== cause.id) : [...prev, cause.id]);
-                                        setEditCauseId("");
-                                      } else {
-                                        setEditCauseId(cause.id); setEditCustomText("");
-                                      }
+                                      setEditCauseIds(prev => prev.includes(cause.id) ? prev.filter(x => x !== cause.id) : [...prev, cause.id]);
                                     }}
                                     className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
                                   >
-                                    <div className={`${idx === 0 ? "w-4 h-4 rounded border" : "w-4 h-4 rounded-full border"} flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-blue-500 bg-blue-500/20" : "border-muted-foreground/30"}`}>
-                                      {isSelected && (idx === 0 ? <span className="text-blue-400 text-[10px] font-bold">✓</span> : <div className="w-2 h-2 rounded-full bg-blue-500" />)}
+                                    <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-blue-500 bg-blue-500/20" : "border-muted-foreground/30"}`}>
+                                      {isSelected && <span className="text-blue-400 text-[10px] font-bold">✓</span>}
                                     </div>
                                     <div className="flex-1 space-y-1">
                                       <div className="flex items-center gap-2">
@@ -2365,11 +2350,13 @@ function CasePage() {
                                 );
                               })}
                               <button type="button"
-                                onClick={() => { setEditCauseId("custom"); setEditCauseIds([]); }}
-                                className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${editCauseId === "custom" ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
+                                onClick={() => {
+                                  setEditCauseIds(prev => prev.includes("custom") ? prev.filter(x => x !== "custom") : [...prev, "custom"]);
+                                }}
+                                className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${editCauseIds.includes("custom") ? "border-blue-500 bg-blue-500/5 text-foreground" : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"}`}
                               >
-                                <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${editCauseId === "custom" ? "border-blue-500" : "border-muted-foreground/30"}`}>
-                                  {editCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-blue-500" />}
+                                <div className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 mt-0.5 ${editCauseIds.includes("custom") ? "border-blue-500 bg-blue-500/20" : "border-muted-foreground/30"}`}>
+                                  {editCauseIds.includes("custom") && <span className="text-blue-400 text-[10px] font-bold">✓</span>}
                                 </div>
                                 <div className="flex-1 space-y-1">
                                   <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">Custom</span>
@@ -2377,7 +2364,7 @@ function CasePage() {
                                 </div>
                               </button>
                             </div>
-                            {editCauseId === "custom" && (
+                            {editCauseIds.includes("custom") && (
                               <div className="space-y-2">
                                 <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">WRITE CUSTOM EXPLANATION</label>
                                 <textarea
@@ -2391,26 +2378,18 @@ function CasePage() {
                             )}
                             <div className="flex gap-2 pt-1">
                               <button
-                                disabled={
-                                  idx === 0
-                                    ? editCauseIds.length === 0 && editCauseId !== "custom"
-                                    : (!editCauseId || (editCauseId === "custom" && !editCustomText.trim()))
-                                }
+                                disabled={editCauseIds.length === 0 || (editCauseIds.includes("custom") && !editCustomText.trim())}
                                 onClick={async () => {
                                   if (!convId || !step.userMessageId) return;
                                   let answerText = "";
-                                  if (editCauseId === "custom") {
-                                    if (!editCustomText.trim()) { toast.error("Please enter a custom explanation."); return; }
-                                    answerText = `I select the ${editCustomText.trim()}.`;
-                                  } else if (idx === 0 && editCauseIds.length > 0) {
-                                    const causes = step.possibleCauses.filter((c: any) => editCauseIds.includes(c.id));
-                                    answerText = causes.length === 1
-                                      ? `I select ${causes[0].id}: ${causes[0].description}`
-                                      : `Multiple root causes identified:\n${causes.map((c: any) => `- ${c.description}`).join("\n")}`;
-                                  } else {
-                                    const cause = step.possibleCauses.find((c: any) => c.id === editCauseId);
-                                    if (cause) answerText = `I select ${cause.id}: ${cause.description}`;
+                                  const causes = step.possibleCauses.filter((c: any) => editCauseIds.includes(c.id));
+                                  if (editCauseIds.includes("custom") && editCustomText.trim()) {
+                                    causes.push({ id: "custom", description: editCustomText.trim() });
                                   }
+                                  if (causes.length === 0) { toast.error("Please select a cause."); return; }
+                                  answerText = causes.length === 1
+                                    ? `I select ${causes[0].id}: ${causes[0].description}`
+                                    : `Multiple root causes identified:\n${causes.map((c: any) => `- ${c.description}`).join("\n")}`;
                                   if (!answerText) { toast.error("Please select a cause."); return; }
                                   try {
                                     await updateUserMsgFn({ data: { conversationId: convId, messageId: step.userMessageId, content: answerText } });
@@ -2439,50 +2418,33 @@ function CasePage() {
                             {step.possibleCauses && step.possibleCauses.length > 0 ? (
                               <div className="space-y-4">
                                 <div className="space-y-2">
-                                  {idx === 0 ? (
-                                    <div className="flex items-center justify-between">
-                                      <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT ONE OR MORE CAUSES</label>
-                                      <span className="text-[9px] text-primary font-mono bg-primary/10 border border-primary/20 px-2 py-0.5 rounded">Multi-select — triggers FTA if multiple</span>
-                                    </div>
-                                  ) : (
-                                    <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT A CAUSE OR CHOOSE CUSTOM</label>
-                                  )}
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">SELECT ONE OR MORE CAUSES</label>
+                                    <span className="text-[9px] text-primary font-mono bg-primary/10 border border-primary/20 px-2 py-0.5 rounded">Multi-select — FTA recommended when multiple causes identified</span>
+                                  </div>
                                   <div className="grid gap-2">
                                     {step.possibleCauses.map((cause: any) => {
-                                      const isSelected = idx === 0
-                                        ? selectedCauseIds.includes(cause.id)
-                                        : selectedCauseId === cause.id;
+                                      const isSelected = selectedCauseIds.includes(cause.id);
                                       return (
                                         <button
                                           key={cause.id}
                                           type="button"
                                           disabled={sendMut.isPending}
                                           onClick={() => {
-                                            if (idx === 0) {
-                                              setSelectedCauseIds(prev =>
-                                                prev.includes(cause.id)
-                                                  ? prev.filter(id => id !== cause.id)
-                                                  : [...prev, cause.id]
-                                              );
-                                            } else {
-                                              setSelectedCauseId(cause.id);
-                                              setCustomCauseText("");
-                                            }
+                                            setSelectedCauseIds(prev =>
+                                              prev.includes(cause.id)
+                                                ? prev.filter(id => id !== cause.id)
+                                                : [...prev, cause.id]
+                                            );
                                           }}
                                           className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${isSelected
                                             ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                             : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                             }`}
                                         >
-                                          {idx === 0 ? (
-                                            <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
-                                              {isSelected && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
-                                            </div>
-                                          ) : (
-                                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary" : "border-muted-foreground/30"}`}>
-                                              {isSelected && <div className="w-2 h-2 rounded-full bg-primary" />}
-                                            </div>
-                                          )}
+                                          <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${isSelected ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
+                                            {isSelected && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
+                                          </div>
                                           <div className="flex-1 space-y-1">
                                             <div className="flex items-center gap-2">
                                               <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">{cause.category}</span>
@@ -2499,30 +2461,20 @@ function CasePage() {
                                       type="button"
                                       disabled={sendMut.isPending}
                                       onClick={() => {
-                                        if (idx === 0) {
-                                          setSelectedCauseIds(prev =>
-                                            prev.includes("custom")
-                                              ? prev.filter(id => id !== "custom")
-                                              : [...prev, "custom"]
-                                          );
-                                        } else {
-                                          setSelectedCauseId("custom");
-                                        }
+                                        setSelectedCauseIds(prev =>
+                                          prev.includes("custom")
+                                            ? prev.filter(id => id !== "custom")
+                                            : [...prev, "custom"]
+                                        );
                                       }}
-                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${(idx === 0 ? selectedCauseIds.includes("custom") : selectedCauseId === "custom")
+                                      className={`w-full text-left p-3 rounded-lg border transition-all flex items-start gap-3 ${selectedCauseIds.includes("custom")
                                         ? "border-primary bg-primary/5 text-foreground shadow-sm shadow-primary/5"
                                         : "border-border/60 hover:border-border hover:bg-secondary/40 text-muted-foreground"
                                         }`}
                                     >
-                                      {idx === 0 ? (
-                                        <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseIds.includes("custom") ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
-                                          {selectedCauseIds.includes("custom") && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
-                                        </div>
-                                      ) : (
-                                        <div className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseId === "custom" ? "border-primary" : "border-muted-foreground/30"}`}>
-                                          {selectedCauseId === "custom" && <div className="w-2 h-2 rounded-full bg-primary" />}
-                                        </div>
-                                      )}
+                                      <div className={`w-4 h-4 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${selectedCauseIds.includes("custom") ? "border-primary bg-primary" : "border-muted-foreground/30"}`}>
+                                        {selectedCauseIds.includes("custom") && <div className="w-2 h-2 bg-primary-foreground" style={{ clipPath: "polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%)" }} />}
+                                      </div>
                                       <div className="flex-1 space-y-1">
                                         <span className="text-[9px] font-mono font-bold bg-muted px-1.5 py-0.5 rounded text-muted-foreground uppercase">Custom</span>
                                         <p className="text-xs font-semibold text-foreground">Write a custom explanation/cause for this step</p>
@@ -2531,7 +2483,7 @@ function CasePage() {
                                   </div>
                                 </div>
 
-                                {(selectedCauseId === "custom" || (idx === 0 && selectedCauseIds.includes("custom"))) && (
+                                {selectedCauseIds.includes("custom") && (
                                   <div className="space-y-2 animate-fadeIn">
                                     <label className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider block">WRITE CUSTOM EXPLANATION</label>
                                     <Textarea
@@ -2547,10 +2499,13 @@ function CasePage() {
                                   </div>
                                 )}
 
-                                {idx === 0 && selectedCauseIds.length > 1 && (
-                                  <div className="flex items-center gap-2 p-2 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-400 text-[10px] font-mono">
-                                    <span className="font-bold">{selectedCauseIds.length} causes selected</span>
-                                    <span className="text-muted-foreground">— submitting will auto-route to Fault Tree Analysis</span>
+                                {selectedCauseIds.length > 1 && (
+                                  <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300 text-[10px] font-mono">
+                                    <span className="shrink-0 mt-0.5">⚠</span>
+                                    <div>
+                                      <span className="font-bold">{selectedCauseIds.length} causes selected</span>
+                                      <span className="text-amber-700 dark:text-amber-200/80"> — Fault Tree Analysis is recommended since multiple causes are identified. Complete the 5-Why chain first, then proceed to FTA.</span>
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -2561,6 +2516,24 @@ function CasePage() {
                                   <h4 className="font-bold text-sm uppercase mono tracking-wide">Analysis Chain Complete</h4>
                                 </div>
                                 <p className="text-xs text-muted-foreground">The 5-Why analysis has successfully isolated the fundamental root cause of this operational trip.</p>
+                                {hadMultipleCauses && ftaAgentIdx !== -1 && (
+                                  <div className="flex items-start gap-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                                    <span className="text-amber-400 text-base shrink-0">⚠</span>
+                                    <div className="space-y-2 flex-1">
+                                      <p className="text-xs font-semibold text-amber-400 font-mono uppercase tracking-wide">Fault Tree Analysis Recommended</p>
+                                      <p className="text-xs text-muted-foreground">Multiple root causes were identified in this analysis. FTA is recommended to map the logical relationships between causes and calculate failure probabilities.</p>
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="border-amber-500/40 text-amber-400 hover:bg-amber-500/10 font-semibold flex items-center gap-2 text-xs"
+                                        onClick={() => goToAgent(ftaAgentIdx)}
+                                      >
+                                        Proceed to Fault Tree Analysis
+                                        <ArrowRight className="w-3.5 h-3.5" />
+                                      </Button>
+                                    </div>
+                                  </div>
+                                )}
                                 <div className="flex justify-end pt-2">
                                   <Button
                                     variant="default"
@@ -2579,7 +2552,7 @@ function CasePage() {
                               <div className="flex justify-end pt-2">
                                 <Button
                                   variant="default"
-                                  disabled={sendMut.isPending || step.isStreaming || (idx === 0 ? selectedCauseIds.length === 0 : (!selectedCauseId && !customCauseText.trim()))}
+                                  disabled={sendMut.isPending || step.isStreaming || (selectedCauseIds.length === 0 || (selectedCauseIds.includes("custom") && !customCauseText.trim()))}
                                   onClick={submitResponse}
                                   className="bg-primary hover:bg-primary/95 text-primary-foreground font-semibold flex items-center gap-2"
                                 >
@@ -6799,25 +6772,29 @@ function CasePage() {
               <span className="text-sm font-medium">
                 {caseQ.data?.case.is_public ? "Public — Anyone can view" : "Private — Only authorized users"}
               </span>
-              <button
-                onClick={async () => {
-                  setTogglingPublic(true);
-                  try {
-                    await togglePublicMut.mutateAsync();
-                  } finally {
-                    setTogglingPublic(false);
-                  }
-                }}
-                disabled={togglingPublic}
-                className={`relative w-11 h-6 rounded-full transition-colors flex items-center ${caseQ.data?.case.is_public ? "bg-emerald-500" : "bg-secondary border border-border"
-                  }`}
-              >
-                {togglingPublic ? (
-                  <Loader2 className="w-3 h-3 animate-spin mx-auto" />
-                ) : (
-                  <span className={`w-5 h-5 rounded-full bg-white shadow transition-transform mx-0.5 ${caseQ.data?.case.is_public ? "translate-x-5" : "translate-x-0"}`} />
-                )}
-              </button>
+              {isOwnerOfCase ? (
+                <button
+                  onClick={async () => {
+                    setTogglingPublic(true);
+                    try {
+                      await togglePublicMut.mutateAsync();
+                    } finally {
+                      setTogglingPublic(false);
+                    }
+                  }}
+                  disabled={togglingPublic}
+                  className={`relative w-11 h-6 rounded-full transition-colors flex items-center ${caseQ.data?.case.is_public ? "bg-emerald-500" : "bg-secondary border border-border"
+                    }`}
+                >
+                  {togglingPublic ? (
+                    <Loader2 className="w-3 h-3 animate-spin mx-auto" />
+                  ) : (
+                    <span className={`w-5 h-5 rounded-full bg-white shadow transition-transform mx-0.5 ${caseQ.data?.case.is_public ? "translate-x-5" : "translate-x-0"}`} />
+                  )}
+                </button>
+              ) : (
+                <span className="text-xs text-muted-foreground italic">Owner only</span>
+              )}
             </div>
             {caseQ.data?.case.is_public && caseQ.data.case.public_slug && (
               <div className="space-y-2">
@@ -7127,7 +7104,7 @@ function CasePage() {
               <button
                 onClick={() => {
                   if (caseQ.data?.case.status !== "completed") {
-                    toast.warning("Complete the RCA first to make it public");
+                    toast.warning("RCA can only be made public after the report is generated and locked");
                     return;
                   }
                   setShowSharePopover(true);
@@ -7136,7 +7113,7 @@ function CasePage() {
                     ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
                     : "border-border/60 bg-secondary/30 text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
                   }`}
-                title={caseQ.data?.case.status !== "completed" ? "Complete the RCA first" : "Share publicly"}
+                title={caseQ.data?.case.status !== "completed" ? "Report must be generated and locked before sharing publicly" : "Share publicly"}
               >
                 <Globe className="w-3 h-3" />
                 <span className="hidden xl:inline">{caseQ.data?.case.is_public ? "Public" : "Share"}</span>
@@ -7598,7 +7575,7 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
       <div className="space-y-3">
         <div className="bg-primary/5 border-l-2 border-primary p-3 rounded-r">
           <p className="text-[10px] font-mono text-primary mb-1 uppercase tracking-wider">// WHY STEP {stepNum}</p>
-          <p className="text-sm font-semibold text-foreground">{data.question || "Awaiting question..."}</p>
+          <p className="text-sm font-semibold text-foreground">{data.question || data.why || data.whyQuestion || "Awaiting question..."}</p>
         </div>
         {data.possibleCauses && Array.isArray(data.possibleCauses) && data.possibleCauses.length > 0 && (
           <div className="space-y-2">

@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-router";
 import { AuthProvider } from "@/hooks/use-auth";
 import { ThemeProvider } from "@/components/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 import { Loader2, Activity } from "lucide-react";
 
 import appCss from "../styles.css?url";
@@ -164,6 +165,7 @@ function RootComponent() {
         <AuthProvider>
           <Outlet />
           <TransitionSpinner />
+          <Toaster richColors position="top-right" />
         </AuthProvider>
       </ThemeProvider>
     </QueryClientProvider>
