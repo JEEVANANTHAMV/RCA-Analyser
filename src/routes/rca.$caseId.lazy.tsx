@@ -7424,12 +7424,7 @@ function CasePage() {
                 <span className="hidden xl:inline">{caseQ.data?.case.is_public ? "Public" : "Share"}</span>
               </button>
               <span className="text-[10px] text-muted-foreground/60 font-mono mt-0.5 whitespace-nowrap">
-                {saveStatus === "saving" ? (
-                  <span className="flex items-center gap-1">
-                    <Loader2 className="w-2.5 h-2.5 animate-spin text-primary" />
-                    Saving changes...
-                  </span>
-                ) : saveStatus === "error" ? (
+                {saveStatus === "error" ? (
                   <span className="text-red-400 font-semibold">Save failed</span>
                 ) : lastSavedTime ? (
                   <span>Last saved on {lastSavedTime.toLocaleTimeString()}</span>
