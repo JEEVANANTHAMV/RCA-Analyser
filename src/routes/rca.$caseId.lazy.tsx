@@ -3,6 +3,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { AuthGate } from "@/components/app-shell";
+import { useAuth } from "@/hooks/use-auth";
 import { AGENTS, type AgentKey } from "@/lib/agents";
 import { normalizePareto, normalizeTimeline, normalizeEquipment, normalizeFishbone } from "@/lib/rca.normalize";
 import {
@@ -28,6 +29,11 @@ import {
   removeCollaborator,
   getEditHistory,
   revertEditVersion,
+  getCaseLock,
+  acquireCaseLock,
+  releaseCaseLock,
+  heartbeatCaseLock,
+  forceTakeCaseLock,
 } from "@/lib/rca.functions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -246,6 +252,7 @@ function parseMaybeJson(str: string): any {
 
 function CasePage() {
   const { caseId } = Route.useParams();
+  const { user } = useAuth();
   const qc = useQueryClient();
 
   const getCaseFullFn = useServerFn(getCaseFull);
@@ -416,6 +423,11 @@ function CasePage() {
   const [togglingPublic, setTogglingPublic] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  // Collaborative editing lock state
+  type LockInfo = { user_id: string; full_name: string | null; email: string; locked_at: string; last_heartbeat: string } | null;
+  const [lockInfo, setLockInfo] = useState<LockInfo>(null);
+  const [lockAcquiring, setLockAcquiring] = useState(false);
+
   // Automation state
   const [showAutoModal, setShowAutoModal] = useState(false);
   const [autoProgress, setAutoProgress] = useState<Array<{
@@ -426,9 +438,82 @@ function CasePage() {
   const [autoRunning, setAutoRunning] = useState(false);
   const [activeEditCat, setActiveEditCat] = useState("manpower");
 
+  // ── Lock queries & mutations ─────────────────────────────────────────────────
+  const getCaseLockFn = useServerFn(getCaseLock);
+  const acquireCaseLockFn = useServerFn(acquireCaseLock);
+  const releaseCaseLockFn = useServerFn(releaseCaseLock);
+  const heartbeatCaseLockFn = useServerFn(heartbeatCaseLock);
+  const forceTakeCaseLockFn = useServerFn(forceTakeCaseLock);
+
+  const lockQ = useQuery({
+    queryKey: ["case-lock", caseId],
+    queryFn: async () => {
+      const res = await getCaseLockFn({ data: { caseId } });
+      setLockInfo((res as any)?.lock ?? null);
+      return res;
+    },
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
+
+  const acquireLockMut = useMutation({
+    mutationFn: async () => {
+      setLockAcquiring(true);
+      const res = await acquireCaseLockFn({ data: { caseId } }) as any;
+      if (res?.acquired) {
+        setLockInfo({ user_id: user!.id, full_name: user!.fullName, email: user!.email, locked_at: new Date().toISOString(), last_heartbeat: new Date().toISOString() });
+      }
+      return res;
+    },
+    onSettled: () => setLockAcquiring(false),
+  });
+
+  const releaseLockMut = useMutation({
+    mutationFn: async () => releaseCaseLockFn({ data: { caseId } }),
+    onSuccess: () => { setLockInfo(null); qc.invalidateQueries({ queryKey: ["case-lock", caseId] }); },
+  });
+
+  const heartbeatLockMut = useMutation({
+    mutationFn: async () => heartbeatCaseLockFn({ data: { caseId } }),
+  });
+
+  const forceTakeLockMut = useMutation({
+    mutationFn: async () => {
+      const res = await forceTakeCaseLockFn({ data: { caseId } }) as any;
+      if (res?.taken) {
+        setLockInfo({ user_id: user!.id, full_name: user!.fullName, email: user!.email, locked_at: new Date().toISOString(), last_heartbeat: new Date().toISOString() });
+        toast.success("You have taken control of this RCA");
+      }
+    },
+  });
+
+  // iHoldLock: current user holds the active lock
+  const iHoldLock = !!lockInfo && !!user && lockInfo.user_id === user.id;
+  const isOwnerOfCase = caseQ.data?.isOwner ?? false;
+  // canEdit: no one holds lock, OR current user holds it
+  const canEdit = !lockInfo || iHoldLock;
+
+  // Helper: acquire lock before any edit action. Returns true if cleared to proceed.
+  const ensureLock = useCallback(async (): Promise<boolean> => {
+    if (iHoldLock) return true;
+    if (lockInfo) {
+      const name = lockInfo.full_name || lockInfo.email;
+      toast.error(`${name} is currently editing this RCA. Ask them to release control first, or the owner can take control.`);
+      return false;
+    }
+    const res = await acquireCaseLockFn({ data: { caseId } }) as any;
+    if (res?.acquired) {
+      setLockInfo({ user_id: user!.id, full_name: user!.fullName, email: user!.email, locked_at: new Date().toISOString(), last_heartbeat: new Date().toISOString() });
+      return true;
+    }
+    toast.error(`${res?.heldBy ?? "Another user"} is currently editing this RCA.`);
+    return false;
+  }, [iHoldLock, lockInfo, acquireCaseLockFn, caseId, user]);
+
   const generateHypothesisFn = useServerFn(generateAgentHypothesis);
   const hypothesisMut = useMutation({
     mutationFn: async () => {
+      if (!await ensureLock()) return;
       setStreamingText("");
       const res = await generateHypothesisFn({ data: { caseId, agentKey: currentAgent.key } });
       if (!(res instanceof Response)) {
@@ -468,6 +553,7 @@ function CasePage() {
   const saveCaseIncidentFn = useServerFn(updateCaseIncidentData);
   const saveCollectorMut = useMutation({
     mutationFn: async (overrideData?: { locked?: boolean; silent?: boolean }) => {
+      if (!overrideData?.silent && !await ensureLock()) return;
       const gapsArr = editGaps.split("\n").map(line => line.trim()).filter(Boolean);
       const followUpsArr = editFollowUps.split("\n").map(line => line.trim()).filter(Boolean);
       const lockedVal = overrideData && overrideData.locked !== undefined ? overrideData.locked : editLocked;
@@ -637,7 +723,7 @@ function CasePage() {
     queryFn: () => ensure({ data: { caseId, agentKey: currentAgent.key } }),
     enabled: !!currentAgent,
   });
-  const convId = convQ.data?.conversation.id;
+  const convId = convQ.data?.conversation?.id;
 
   const getMsgsFn = useServerFn(getConversationMessages);
   const msgsQ = useQuery({
@@ -681,6 +767,20 @@ function CasePage() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [msgsQ.data?.messages.length, convId]);
 
+  // Heartbeat: keep the lock alive every 60s while this user holds it.
+  useEffect(() => {
+    if (!iHoldLock) return;
+    const id = setInterval(() => { heartbeatLockMut.mutate(); }, 60_000);
+    return () => clearInterval(id);
+  }, [iHoldLock]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Release lock on page unmount to free it immediately rather than waiting 2 h.
+  useEffect(() => {
+    return () => {
+      if (iHoldLock) { releaseCaseLockFn({ data: { caseId } }).catch(() => {}); }
+    };
+  }, [iHoldLock, caseId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const send = useServerFn(sendAgentMessage);
   const inputRef = useRef(input);
   inputRef.current = input;
@@ -693,6 +793,7 @@ function CasePage() {
     mutationFn: async (customMsg?: string) => {
       const cid = convIdRef.current;
       if (!cid) throw new Error("No conversation selected");
+      if (!await ensureLock()) return;
       setStreamingChatText("");
       const res = await send({
         data: {
@@ -798,6 +899,7 @@ function CasePage() {
   const runAutoFn = useServerFn(runFullAutomation);
   const autoMut = useMutation({
     mutationFn: async () => {
+      if (!await ensureLock()) return;
       setAutoProgress([]);
       setAutoLiveText({});
       setAutoRunning(true);
@@ -6633,6 +6735,50 @@ function CasePage() {
     <div className={`flex flex-col gap-3 animate-fadeIn ${isFullscreen ? "h-screen fixed inset-0 z-[100] bg-background p-3 overflow-hidden" : "h-[calc(100vh-7rem)]"}`}>
       {renderAutoModal()}
 
+      {/* ── Collaborative Editing Lock Banner ─────────────────────────────── */}
+      {lockInfo && !iHoldLock && (
+        <div className="flex items-center justify-between px-4 py-2.5 rounded-lg border border-amber-500/40 bg-amber-500/8 text-sm animate-fadeIn">
+          <div className="flex items-center gap-2.5">
+            <Lock className="w-4 h-4 text-amber-500 shrink-0" />
+            <span className="text-foreground">
+              This RCA is being edited by{" "}
+              <strong className="text-amber-500">{lockInfo.full_name || lockInfo.email}</strong>
+              {" "}— view only until they release control.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 ml-4 shrink-0">
+            {isOwnerOfCase && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs border-amber-500/50 text-amber-500 hover:bg-amber-500/10 hover:border-amber-500/70"
+                onClick={() => forceTakeLockMut.mutate()}
+                disabled={forceTakeLockMut.isPending}
+              >
+                {forceTakeLockMut.isPending ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Unlock className="w-3 h-3 mr-1" />}
+                Take Control
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {iHoldLock && (
+        <div className="flex items-center justify-between px-4 py-1.5 rounded-lg border border-primary/30 bg-primary/6 text-xs animate-fadeIn">
+          <div className="flex items-center gap-2 text-primary/80">
+            <Edit className="w-3 h-3" />
+            <span>You are editing this RCA — others are in view-only mode</span>
+          </div>
+          <button
+            onClick={() => releaseLockMut.mutate()}
+            disabled={releaseLockMut.isPending}
+            className="ml-4 shrink-0 text-[10px] font-mono flex items-center gap-1 border border-primary/30 hover:border-primary/60 rounded px-2 py-0.5 text-primary/70 hover:text-primary transition-colors"
+          >
+            <Unlock className="w-2.5 h-2.5" />
+            Release Control
+          </button>
+        </div>
+      )}
+
       {/* ── Share / Make Public Overlay ───────────────────────────────────── */}
       {showSharePopover && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowSharePopover(false)}>
@@ -6814,63 +6960,86 @@ function CasePage() {
       )}
 
       {/* ── Edit History Panel ────────────────────────────────────────────── */}
-      {showHistoryPanel && (
-        <div className="fixed inset-0 z-50 flex" onClick={() => setShowHistoryPanel(false)}>
-          <div className="flex-1" />
-          <div className="w-80 bg-background border-l border-border shadow-2xl flex flex-col max-h-screen" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-4 border-b border-border/60 shrink-0">
-              <div className="flex items-center gap-2">
-                <History className="w-4 h-4 text-primary" />
-                <h3 className="font-bold text-sm">Edit History</h3>
+      {showHistoryPanel && (() => {
+        const sectionMeta: Record<string, { label: string; color: string; icon: React.ReactNode }> = {
+          incident_data:       { label: "Incident Data Edit",    color: "text-amber-500",   icon: <Edit className="w-3 h-3" /> },
+          agent_run:           { label: "Agent Analysis Run",    color: "text-sky-400",     icon: <Activity className="w-3 h-3" /> },
+          full_automation:     { label: "Full Automation",       color: "text-violet-400",  icon: <Zap className="w-3 h-3" /> },
+          report_saved:        { label: "Report Saved",          color: "text-emerald-400", icon: <FileText className="w-3 h-3" /> },
+          collaborator_added:  { label: "Collaborator Added",    color: "text-green-500",   icon: <UserPlus className="w-3 h-3" /> },
+          collaborator_removed:{ label: "Collaborator Removed",  color: "text-red-400",     icon: <UserMinus className="w-3 h-3" /> },
+          lock_acquired:       { label: "Lock Acquired",         color: "text-sky-300",     icon: <Lock className="w-3 h-3" /> },
+          lock_force_taken:    { label: "Control Reclaimed",     color: "text-orange-400",  icon: <AlertTriangle className="w-3 h-3" /> },
+        };
+        const getMeta = (section: string) =>
+          sectionMeta[section] ?? { label: section, color: "text-muted-foreground", icon: <History className="w-3 h-3" /> };
+
+        return (
+          <div className="fixed inset-0 z-50 flex" onClick={() => setShowHistoryPanel(false)}>
+            <div className="flex-1" />
+            <div className="w-80 bg-background border-l border-border shadow-2xl flex flex-col max-h-screen" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between p-4 border-b border-border/60 shrink-0">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-primary" />
+                  <h3 className="font-bold text-sm">Edit History</h3>
+                  <span className="text-[10px] text-muted-foreground font-mono">({(historyQ.data?.history ?? []).length})</span>
+                </div>
+                <button onClick={() => setShowHistoryPanel(false)} className="text-muted-foreground hover:text-foreground">
+                  <XCircle className="w-4 h-4" />
+                </button>
               </div>
-              <button onClick={() => setShowHistoryPanel(false)} className="text-muted-foreground hover:text-foreground">
-                <XCircle className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {historyQ.isLoading ? (
-                <div className="flex items-center gap-2 text-xs text-muted-foreground mt-4 justify-center"><Loader2 className="w-3 h-3 animate-spin" /> Loading history…</div>
-              ) : (historyQ.data?.history ?? []).length === 0 ? (
-                <p className="text-xs text-muted-foreground italic text-center mt-8">No edit history yet. Changes to incident details will appear here.</p>
-              ) : (
-                (historyQ.data?.history ?? []).map((entry) => (
-                  <div key={entry.id} className="p-3 rounded-lg border border-border/40 bg-secondary/10 space-y-1.5">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium truncate">{entry.full_name || entry.email}</p>
-                        <p className="text-[10px] text-muted-foreground font-mono">{entry.summary || entry.section}</p>
+              <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                {historyQ.isLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground mt-4 justify-center"><Loader2 className="w-3 h-3 animate-spin" /> Loading history…</div>
+                ) : (historyQ.data?.history ?? []).length === 0 ? (
+                  <p className="text-xs text-muted-foreground italic text-center mt-8">No activity recorded yet. Agent runs, edits, and collaboration events will appear here.</p>
+                ) : (
+                  (historyQ.data?.history ?? []).map((entry) => {
+                    const meta = getMeta(entry.section);
+                    return (
+                      <div key={entry.id} className="p-3 rounded-lg border border-border/40 bg-secondary/10 space-y-1.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 mb-0.5">
+                              <span className={meta.color}>{meta.icon}</span>
+                              <span className={`text-[10px] font-semibold font-mono ${meta.color}`}>{meta.label}</span>
+                            </div>
+                            <p className="text-xs font-medium truncate">{entry.full_name || entry.email}</p>
+                            <p className="text-[10px] text-muted-foreground">{entry.summary || entry.section}</p>
+                          </div>
+                          {caseQ.data?.isOwner && entry.section === "incident_data" && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm("Revert incident data to this version? Current data will be saved in history first.")) {
+                                  revertMut.mutate(entry.id);
+                                }
+                              }}
+                              disabled={revertMut.isPending}
+                              className="shrink-0 text-[9px] font-mono flex items-center gap-1 text-muted-foreground hover:text-primary border border-border/40 hover:border-primary/40 rounded px-1.5 py-0.5 transition-colors"
+                              title="Revert to this version"
+                            >
+                              <RotateCcw className="w-2.5 h-2.5" />
+                              Revert
+                            </button>
+                          )}
+                        </div>
+                        <p className="text-[9px] text-muted-foreground/60 font-mono">
+                          {new Date(entry.changed_at).toLocaleString()}
+                        </p>
                       </div>
-                      {caseQ.data?.isOwner && entry.section === "incident_data" && (
-                        <button
-                          onClick={() => {
-                            if (window.confirm("Revert incident data to this version? Current data will be saved in history first.")) {
-                              revertMut.mutate(entry.id);
-                            }
-                          }}
-                          disabled={revertMut.isPending}
-                          className="shrink-0 text-[9px] font-mono flex items-center gap-1 text-muted-foreground hover:text-primary border border-border/40 hover:border-primary/40 rounded px-1.5 py-0.5 transition-colors"
-                          title="Revert to this version"
-                        >
-                          <RotateCcw className="w-2.5 h-2.5" />
-                          Revert
-                        </button>
-                      )}
-                    </div>
-                    <p className="text-[9px] text-muted-foreground/60 font-mono">
-                      {new Date(entry.changed_at).toLocaleString()}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-            <div className="p-3 border-t border-border/40 shrink-0">
-              <p className="text-[9px] text-muted-foreground font-mono text-center">
-                History tracks incident data edits. Click Revert to restore a version.
-              </p>
+                    );
+                  })
+                )}
+              </div>
+              <div className="p-3 border-t border-border/40 shrink-0">
+                <p className="text-[9px] text-muted-foreground font-mono text-center">
+                  Tracks edits, agent runs, automation, collaboration &amp; lock events.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Agent Progress Bar */}
       <div className="panel p-3">
@@ -6899,6 +7068,19 @@ function CasePage() {
             <Badge variant="outline" className="text-xs mono">
               {completedAgents.size + skippedAgents.size}/{AGENTS.length} steps
             </Badge>
+            {/* Lock status indicator */}
+            {lockInfo && !iHoldLock && (
+              <Badge variant="outline" className="text-xs border-amber-500/50 text-amber-500 bg-amber-500/8 flex items-center gap-1">
+                <Lock className="w-2.5 h-2.5" />
+                <span className="hidden sm:inline">{lockInfo.full_name || lockInfo.email.split("@")[0]}</span>
+              </Badge>
+            )}
+            {iHoldLock && (
+              <Badge variant="outline" className="text-xs border-primary/40 text-primary bg-primary/8 flex items-center gap-1">
+                <Edit className="w-2.5 h-2.5" />
+                <span className="hidden sm:inline">Editing</span>
+              </Badge>
+            )}
             {/* Mobile Sidebar Toggle Button */}
             <button
               onClick={() => setMobileSidebarOpen(true)}

@@ -179,6 +179,19 @@ export async function initializeSchema(): Promise<void> {
     ) CHARACTER SET utf8mb4
   `);
 
+  // Advisory lock table — one row per case, tracks who is actively editing.
+  // Lock expires automatically after 2 hours of no heartbeat.
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS case_locks (
+      case_id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      locked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_heartbeat DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4
+  `);
+
   // Indexes (CREATE INDEX IF NOT EXISTS not supported in older MySQL — use IF NOT EXISTS workaround)
   const indexes = [
     "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at)",

@@ -397,6 +397,49 @@ function generatePublicSlug(): string {
   return s;
 }
 
+// Returns the case owner's userId (or null if case not found).
+async function getCaseOwnerId(caseId: string): Promise<string | null> {
+  const row = await queryOne<{ user_id: string }>(
+    "SELECT user_id FROM rca_cases WHERE id = ?",
+    [caseId],
+  );
+  return row?.user_id ?? null;
+}
+
+// Throws if a different user holds an active (non-expired) lock on the case.
+// "Active" means last_heartbeat within the past 2 hours.
+async function assertNoConflictingLock(caseId: string, userId: string): Promise<void> {
+  const lock = await queryOne<{ user_id: string }>(
+    "SELECT user_id FROM case_locks WHERE case_id = ? AND last_heartbeat > DATE_SUB(NOW(), INTERVAL 2 HOUR)",
+    [caseId],
+  );
+  if (lock && lock.user_id !== userId) {
+    const lockUser = await queryOne<{ full_name: string | null; email: string }>(
+      "SELECT full_name, email FROM users WHERE id = ?",
+      [lock.user_id],
+    );
+    const name = lockUser?.full_name || lockUser?.email || "Another user";
+    throw new Error(`LOCK_CONFLICT:${name}`);
+  }
+}
+
+async function addHistoryEntry(
+  caseId: string,
+  userId: string,
+  section: string,
+  summary: string,
+  snapshot?: string,
+): Promise<void> {
+  try {
+    await execute(
+      "INSERT INTO rca_edit_history (id, case_id, user_id, section, snapshot, summary) VALUES (?, ?, ?, ?, ?, ?)",
+      [generateId(), caseId, userId, section, snapshot ?? null, summary],
+    );
+  } catch {
+    // History is non-critical — never let a history write failure break the main operation
+  }
+}
+
 // ─── Data-only question builders ──────────────────────────────────────────────
 // The agents' system prompts (role, rules, JSON schema) are configured on the
 // Forjinn side. The functions below build ONLY the dynamic incident/findings
@@ -790,7 +833,13 @@ export const sendAgentMessage = createServerFn({ method: "POST" })
       [data.conversationId],
     );
     if (!convo) throw new Error("Conversation not found");
-    if (convo.user_id !== userId) throw new Error("Forbidden");
+    // Allow owner or any collaborator with case access (conversations are now shared under owner's userId)
+    if (convo.rca_case_id) {
+      if (!await isCaseAccessible(convo.rca_case_id, userId, "user")) throw new Error("Forbidden");
+      await assertNoConflictingLock(convo.rca_case_id, userId);
+    } else if (convo.user_id !== userId) {
+      throw new Error("Forbidden");
+    }
 
     let chatId = convo.session_id;
     if (convo.agent_key !== "data_collector" && convo.rca_case_id) {
@@ -1148,9 +1197,14 @@ export const ensureConversation = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
     if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+
+    // All conversations are stored under the case owner's userId so every collaborator
+    // reads and writes to the same shared conversation thread.
+    const ownerId = (await getCaseOwnerId(data.caseId)) ?? userId;
+
     const existing = await queryOne<ConversationRow>(
       "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
-      [data.caseId, data.agentKey, userId],
+      [data.caseId, data.agentKey, ownerId],
     );
     if (existing) return { conversation: existing };
 
@@ -1168,7 +1222,7 @@ export const ensureConversation = createServerFn({ method: "POST" })
     }
     await execute(
       "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
-      [id, userId, data.agentKey, sessionId, data.caseId, agent.name],
+      [id, ownerId, data.agentKey, sessionId, data.caseId, agent.name],
     );
     const created = await queryOne<ConversationRow>("SELECT * FROM conversations WHERE id = ?", [id]);
     return { conversation: created };
@@ -1284,13 +1338,18 @@ export const clearConversationMessages = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input) => z.object({ conversationId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const existing = await queryOne<{ user_id: string }>(
-      "SELECT user_id FROM conversations WHERE id = ?",
+    const { userId, user } = context;
+    const existing = await queryOne<{ user_id: string; rca_case_id: string | null }>(
+      "SELECT user_id, rca_case_id FROM conversations WHERE id = ?",
       [data.conversationId],
     );
     if (!existing) throw new Error("Conversation not found");
-    if (existing.user_id !== userId) throw new Error("Forbidden");
+    if (existing.rca_case_id) {
+      if (!await isCaseAccessible(existing.rca_case_id, userId, user?.role ?? "user")) throw new Error("Forbidden");
+      await assertNoConflictingLock(existing.rca_case_id, userId);
+    } else if (existing.user_id !== userId) {
+      throw new Error("Forbidden");
+    }
     await execute("DELETE FROM messages WHERE conversation_id = ?", [data.conversationId]);
     return { ok: true };
   });
@@ -1301,13 +1360,18 @@ export const truncateMessagesAfter = createServerFn({ method: "POST" })
     z.object({ conversationId: z.string(), afterMessageId: z.string() }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const conv = await queryOne<{ user_id: string }>(
-      "SELECT user_id FROM conversations WHERE id = ?",
+    const { userId, user } = context;
+    const conv = await queryOne<{ user_id: string; rca_case_id: string | null }>(
+      "SELECT user_id, rca_case_id FROM conversations WHERE id = ?",
       [data.conversationId],
     );
     if (!conv) throw new Error("Conversation not found");
-    if (conv.user_id !== userId) throw new Error("Forbidden");
+    if (conv.rca_case_id) {
+      if (!await isCaseAccessible(conv.rca_case_id, userId, user?.role ?? "user")) throw new Error("Forbidden");
+      await assertNoConflictingLock(conv.rca_case_id, userId);
+    } else if (conv.user_id !== userId) {
+      throw new Error("Forbidden");
+    }
     const msg = await queryOne<{ created_at: string }>(
       "SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?",
       [data.afterMessageId, data.conversationId],
@@ -1326,13 +1390,18 @@ export const updateUserMessage = createServerFn({ method: "POST" })
     z.object({ conversationId: z.string(), messageId: z.string(), content: z.string() }).parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { userId } = context;
-    const conv = await queryOne<{ user_id: string }>(
-      "SELECT user_id FROM conversations WHERE id = ?",
+    const { userId, user } = context;
+    const conv = await queryOne<{ user_id: string; rca_case_id: string | null }>(
+      "SELECT user_id, rca_case_id FROM conversations WHERE id = ?",
       [data.conversationId],
     );
     if (!conv) throw new Error("Conversation not found");
-    if (conv.user_id !== userId) throw new Error("Forbidden");
+    if (conv.rca_case_id) {
+      if (!await isCaseAccessible(conv.rca_case_id, userId, user?.role ?? "user")) throw new Error("Forbidden");
+      await assertNoConflictingLock(conv.rca_case_id, userId);
+    } else if (conv.user_id !== userId) {
+      throw new Error("Forbidden");
+    }
     const msg = await queryOne<{ id: string; role: string }>(
       "SELECT id, role FROM messages WHERE id = ? AND conversation_id = ?",
       [data.messageId, data.conversationId],
@@ -1353,11 +1422,13 @@ export const saveFinalReport = createServerFn({ method: "POST" })
       })
       .parse(input),
   )
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
     await execute(
       "UPDATE rca_cases SET final_report = ?, status = 'completed' WHERE id = ?",
       [JSON.stringify(data.report), data.caseId],
     );
+    await addHistoryEntry(data.caseId, userId, "report_saved", "Final report saved — case marked complete");
     const row = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     return { case: row };
   });
@@ -1373,12 +1444,15 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { userId } = context;
+    const { userId, user } = context;
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    await assertNoConflictingLock(data.caseId, userId);
 
-    // 1. Ensure conversation exists
+    // 1. Ensure conversation exists (always under case owner's userId)
+    const ownerId = (await getCaseOwnerId(data.caseId)) ?? userId;
     const convoRes = await queryOne<ConversationRow>(
       "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
-      [data.caseId, data.agentKey, userId],
+      [data.caseId, data.agentKey, ownerId],
     );
 
     let convo: ConversationRow;
@@ -1397,7 +1471,7 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
       }
       await execute(
         "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
-        [id, userId, data.agentKey, sessionId, data.caseId, agent.name],
+        [id, ownerId, data.agentKey, sessionId, data.caseId, agent.name],
       );
       convo = (await queryOne<ConversationRow>("SELECT * FROM conversations WHERE id = ?", [id]))!;
     }
@@ -1555,6 +1629,15 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
           );
 
           await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [convo.id]);
+
+          const agentLabel = AGENT_BY_KEY[data.agentKey as AgentKey]?.name ?? data.agentKey;
+          await addHistoryEntry(
+            data.caseId,
+            userId,
+            "agent_run",
+            `${agentLabel}: analysis run`,
+            JSON.stringify({ agentKey: data.agentKey }),
+          );
         } catch (err: any) {
           controller.error(err);
         } finally {
@@ -1597,6 +1680,7 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
     const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (!await isCaseAccessible(data.caseId, userId, "user")) throw new Error("Forbidden");
+    await assertNoConflictingLock(data.caseId, userId);
 
     let attachments: any[] = [];
     if (rcaCase.incident_data) {
@@ -1928,6 +2012,8 @@ export const runFullAutomation = createServerFn({ method: "POST" })
           controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
 
         try {
+          await addHistoryEntry(data.caseId, userId, "full_automation", "Full AI automation pipeline triggered (8 agents)");
+
           let collectorSessionId: string | null = null;
 
           for (const agentKey of AGENT_KEYS) {
@@ -2168,6 +2254,14 @@ export const runFullAutomation = createServerFn({ method: "POST" })
             }
 
             await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [convo.id]);
+
+            await addHistoryEntry(
+              data.caseId,
+              userId,
+              "agent_run",
+              `${agent.name}: analysis run (automated pipeline)`,
+              JSON.stringify({ agentKey, runType: "full_automation" }),
+            );
 
             // After data_collector, persist structured findings to case incident_data
             if (agentKey === "data_collector" && parsed) {
@@ -2692,6 +2786,96 @@ export const downloadPublicReport = createServerFn({ method: "POST" })
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Case Locks — advisory editing lock for collaborative RCA sessions
+// Lock auto-expires after 2 hours of no heartbeat.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const getCaseLock = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const lock = await queryOne<{ user_id: string; locked_at: string; last_heartbeat: string; full_name: string | null; email: string }>(
+      `SELECT l.user_id, l.locked_at, l.last_heartbeat, u.full_name, u.email
+       FROM case_locks l JOIN users u ON u.id = l.user_id
+       WHERE l.case_id = ? AND l.last_heartbeat > DATE_SUB(NOW(), INTERVAL 2 HOUR)`,
+      [data.caseId],
+    );
+    return { lock: lock ?? null };
+  });
+
+export const acquireCaseLock = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+
+    // Check if an active lock exists held by someone else
+    const existing = await queryOne<{ user_id: string }>(
+      "SELECT user_id FROM case_locks WHERE case_id = ? AND last_heartbeat > DATE_SUB(NOW(), INTERVAL 2 HOUR)",
+      [data.caseId],
+    );
+    if (existing && existing.user_id !== userId) {
+      const lockUser = await queryOne<{ full_name: string | null; email: string }>(
+        "SELECT full_name, email FROM users WHERE id = ?",
+        [existing.user_id],
+      );
+      const name = lockUser?.full_name || lockUser?.email || "Another user";
+      return { acquired: false, heldBy: name };
+    }
+
+    await execute(
+      `INSERT INTO case_locks (case_id, user_id, locked_at, last_heartbeat)
+       VALUES (?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE user_id = ?, locked_at = NOW(), last_heartbeat = NOW()`,
+      [data.caseId, userId, userId],
+    );
+    await addHistoryEntry(data.caseId, userId, "lock_acquired", "Editing control acquired");
+    return { acquired: true, heldBy: null };
+  });
+
+export const releaseCaseLock = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    await execute("DELETE FROM case_locks WHERE case_id = ? AND user_id = ?", [data.caseId, userId]);
+    return { released: true };
+  });
+
+export const heartbeatCaseLock = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId } = context;
+    await execute(
+      "UPDATE case_locks SET last_heartbeat = NOW() WHERE case_id = ? AND user_id = ?",
+      [data.caseId, userId],
+    );
+    return { ok: true };
+  });
+
+// Owner-only: forcibly take the lock, removing any existing holder.
+export const forceTakeCaseLock = createServerFn({ method: "POST" })
+  .middleware([requireAuth])
+  .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const { userId, user } = context;
+    const ownerId = await getCaseOwnerId(data.caseId);
+    if (ownerId !== userId && user?.role !== "admin") throw new Error("Only the case owner can force-take a lock");
+    await execute(
+      `INSERT INTO case_locks (case_id, user_id, locked_at, last_heartbeat)
+       VALUES (?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE user_id = ?, locked_at = NOW(), last_heartbeat = NOW()`,
+      [data.caseId, userId, userId],
+    );
+    await addHistoryEntry(data.caseId, userId, "lock_force_taken", "Owner forcefully reclaimed editing control");
+    return { taken: true };
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Collaborators
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2766,14 +2950,25 @@ export const addCollaborator = createServerFn({ method: "POST" })
     );
     if (!targetUser) throw new Error("User not found");
 
+    let wasAdded = false;
     try {
       const id = generateId();
       await execute(
         "INSERT INTO case_collaborators (id, case_id, user_id, added_by) VALUES (?, ?, ?, ?)",
         [id, data.caseId, data.targetUserId, userId],
       );
+      wasAdded = true;
     } catch {
       // UNIQUE constraint — already a collaborator, silently ignore
+    }
+
+    if (wasAdded) {
+      await addHistoryEntry(
+        data.caseId,
+        userId,
+        "collaborator_added",
+        `Collaborator added: ${targetUser.full_name || targetUser.email}`,
+      );
     }
 
     const collabs = await query<any>(
@@ -2797,7 +2992,18 @@ export const removeCollaborator = createServerFn({ method: "POST" })
     const rcaCase = await queryOne<{ user_id: string }>("SELECT user_id FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
+
+    const removedUser = await queryOne<{ full_name: string | null; email: string }>(
+      "SELECT full_name, email FROM users WHERE id = ?",
+      [data.collaboratorUserId],
+    );
     await execute("DELETE FROM case_collaborators WHERE case_id = ? AND user_id = ?", [data.caseId, data.collaboratorUserId]);
+    await addHistoryEntry(
+      data.caseId,
+      userId,
+      "collaborator_removed",
+      `Collaborator removed: ${removedUser?.full_name || removedUser?.email || data.collaboratorUserId}`,
+    );
     return { ok: true };
   });
 

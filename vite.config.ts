@@ -19,5 +19,12 @@ export default defineConfig({
     server: {
       allowedHosts: ["vedanta.forjinn.com"],
     },
+    build: {
+      rollupOptions: {
+        // mysql2 is a server-only Node.js module — keep it external so Rollup
+        // doesn't try to bundle it into the client/edge bundle.
+        external: ["mysql2", "mysql2/promise"],
+      },
+    },
   },
 });
