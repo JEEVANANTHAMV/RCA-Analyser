@@ -544,7 +544,7 @@ export async function generateRcaXlsx(report: RcaReportData, image?: ReportImage
     const key = WHY_KEYS[i];
     const cur = s1[key] || "";
     const next = s1[WHY_KEYS[i + 1]] || "";
-    if (!cur && i > 4) break; // always show at least 5
+    if (!cur) break;
     labelCell(0, `Why-${i + 1}`);
     valueCell(1, cur); merge(1, 6);
     valueCell(7, next); merge(7, 13);
@@ -688,7 +688,7 @@ export function generateRcaHtml(report: RcaReportData, imageDataUri?: string): s
 
   const whyRows = WHY_KEYS.map((k, i) => {
     const cur = s1[k];
-    if (!cur && i >= 5) return "";
+    if (!cur) return "";
     return `<tr><td class="lbl">Why-${i + 1}</td><td>${esc(cur || "")}</td><td>${esc(s1[WHY_KEYS[i + 1]] || "")}</td></tr>`;
   }).join("");
 
@@ -931,7 +931,7 @@ export async function generateRcaDocx(report: RcaReportData, image?: ReportImage
   ];
   WHY_KEYS.forEach((k, i) => {
     const cur = s1[k];
-    if (!cur && i >= 5) return;
+    if (!cur) return;
     whyRows.push(new TableRow({ children: [cell(`Why-${i + 1}`, { fill: LABEL, bold: true }), cell(cur || ""), cell(s1[WHY_KEYS[i + 1]] || "")] }));
   });
   children.push(fullTable(whyRows));

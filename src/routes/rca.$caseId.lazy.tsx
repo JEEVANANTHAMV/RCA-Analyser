@@ -7965,7 +7965,9 @@ function AgentResponseRenderer({ data }: { data: Record<string, any> }) {
       {data.fiveWhys && Array.isArray(data.fiveWhys) && (
         <div className="space-y-2">
           <p className="text-xs mono text-muted-foreground uppercase">// 5 Why Analysis</p>
-          {data.fiveWhys.map((why: any, idx: number) => (
+          {data.fiveWhys
+            .filter((why: any) => why.answer && why.answer !== "Awaiting operator input..." && why.answer !== "—")
+            .map((why: any, idx: number) => (
             <div key={idx} className="bg-secondary/50 border border-border rounded-lg p-3">
               <div className="flex items-start gap-2">
                 <Badge variant="outline" className="shrink-0 mono text-[10px]">

@@ -98,6 +98,7 @@ export function generateFullStepsHtml(data: FullAnalysisData): string {
     .filter((m) => m.role === "assistant" && m.parsed)
     .map((m) => m.parsed)
     .filter((p) => p && (p.question || p.whyStep))
+    .filter((p) => p.selectedAnswer || p.operatorInstruction || p.answer)
     .sort((a, b) => (a.whyStep || 0) - (b.whyStep || 0));
   const s1 = rptCore.whyWhyAnalysis?.stream1 || {};
   let fiveWhyBody = "";

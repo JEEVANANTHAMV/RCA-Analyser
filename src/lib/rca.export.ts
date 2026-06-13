@@ -334,6 +334,7 @@ export function generateFullAnalysisHtml(data: AllAgentData): string {
   const whySteps = whyMessages
     .map((m) => m.parsed)
     .filter((p) => p && (p.question || p.whyStep))
+    .filter((p) => p.selectedAnswer || p.operatorInstruction || p.answer)
     .sort((a, b) => (a.whyStep || 0) - (b.whyStep || 0));
 
   // Also check for final summary with chains
