@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth-middleware";
-import { getDb, generateId } from "@/lib/database";
+import { query, queryOne, execute, generateId, initializeSchema } from "@/lib/database";
 import { getAgentApiBase, AGENT_BY_KEY, RESPONDER_AGENT_ID, type AgentKey } from "@/lib/agents";
 import fs from "fs";
 import path from "path";
@@ -372,20 +372,21 @@ interface CaseRow {
   updated_at: string;
 }
 
-function isCaseAccessible(
-  db: ReturnType<typeof getDb>,
+async function isCaseAccessible(
   caseId: string,
   userId: string,
   userRole: string,
-): boolean {
-  const row = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(caseId) as
-    | { user_id: string }
-    | undefined;
+): Promise<boolean> {
+  const row = await queryOne<{ user_id: string }>(
+    "SELECT user_id FROM rca_cases WHERE id = ?",
+    [caseId],
+  );
   if (!row) return false;
   if (row.user_id === userId || userRole === "admin") return true;
-  const collab = db
-    .prepare("SELECT id FROM case_collaborators WHERE case_id = ? AND user_id = ?")
-    .get(caseId, userId);
+  const collab = await queryOne(
+    "SELECT id FROM case_collaborators WHERE case_id = ? AND user_id = ?",
+    [caseId, userId],
+  );
   return !!collab;
 }
 
@@ -491,28 +492,25 @@ function buildDataCollectorQuestion(rcaCase: CaseRow): string {
     .join("\n");
 }
 
-function buildFiveWhyQuestion(
-  db: ReturnType<typeof getDb>,
+async function buildFiveWhyQuestion(
   caseId: string,
   rcaCase: CaseRow,
-): string {
+): Promise<string> {
   const f = parseIncidentFields(rcaCase);
-  const tlMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
-  const eqMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
+  const tlMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
+  const eqMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
   return [
     `Problem Statement: ${f.problemStatement || f.description}`,
     `Operational Effect: ${f.effect}`,
@@ -532,29 +530,26 @@ function buildFiveWhyQuestion(
     .join("\n");
 }
 
-function buildFishboneQuestion(
-  db: ReturnType<typeof getDb>,
+async function buildFishboneQuestion(
   caseId: string,
   rcaCase: CaseRow,
   fiveWhySummary: string,
-): string {
+): Promise<string> {
   const f = parseIncidentFields(rcaCase);
-  const tlMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
-  const eqMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
+  const tlMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
+  const eqMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'equipment' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
   return [
     `Incident Title: ${f.title}`,
     `Problem Statement: ${f.problemStatement || f.description}`,
@@ -577,20 +572,18 @@ function buildFishboneQuestion(
 
 // Build prompt for the Timeline agent (runs right after data_collector).
 // Uses the full Q&A from data_collector plus all incident fields from the case.
-function buildTimelineQuestion(
-  db: ReturnType<typeof getDb>,
+async function buildTimelineQuestion(
   caseId: string,
   rcaCase: CaseRow,
-): string {
+): Promise<string> {
   const f = parseIncidentFields(rcaCase);
-  const dcMsgs = db
-    .prepare(
-      `SELECT m.role, m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector'
-       ORDER BY m.created_at ASC`,
-    )
-    .all(caseId) as { role: string; content: string }[];
+  const dcMsgs = await query<{ role: string; content: string }>(
+    `SELECT m.role, m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector'
+     ORDER BY m.created_at ASC`,
+    [caseId],
+  );
   const parts = [
     "INCIDENT DATA:",
     `Problem Statement: ${f.problemStatement || f.description || "(not recorded)"}`,
@@ -626,28 +619,25 @@ STRICT RULES:
 }
 
 // Build prompt for the Equipment agent (runs after timeline, before 5-Why).
-function buildEquipmentQuestion(
-  db: ReturnType<typeof getDb>,
+async function buildEquipmentQuestion(
   caseId: string,
   rcaCase: CaseRow,
-): string {
+): Promise<string> {
   const f = parseIncidentFields(rcaCase);
-  const dcMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
-  const tlMsg = db
-    .prepare(
-      `SELECT m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
-       ORDER BY m.created_at DESC LIMIT 1`,
-    )
-    .get(caseId) as { content: string } | undefined;
+  const dcMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'data_collector' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
+  const tlMsg = await queryOne<{ content: string }>(
+    `SELECT m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'timeline' AND m.role = 'assistant'
+     ORDER BY m.created_at DESC LIMIT 1`,
+    [caseId],
+  );
   const parts = [
     "INCIDENT DATA:",
     `Equipment Name/Tag: ${f.equipmentName || "(not recorded)"}`,
@@ -683,24 +673,22 @@ Do NOT generate placeholder names like "Rahul Sharma", placeholder numbers like 
 // Assemble the prior-agent findings block + the task line for a structured agent.
 // Uses a direct JOIN to avoid picking an empty/wrong conversation when multiple exist,
 // and takes only the last assistant message so placeholder user messages are excluded.
-function buildPriorFindingsQuestion(
-  db: ReturnType<typeof getDb>,
+async function buildPriorFindingsQuestion(
   caseId: string,
   agentKey: string,
   currentIdx: number,
-): string {
+): Promise<string> {
   let q = "Incident findings from the preceding RCA pipeline steps:\n\n";
   for (let i = 0; i < currentIdx; i++) {
     const prevKey = AGENT_KEYS[i];
     const prevAgent = AGENT_BY_KEY[prevKey as AgentKey];
-    const lastMsg = db
-      .prepare(
-        `SELECT m.content FROM messages m
-         INNER JOIN conversations c ON c.id = m.conversation_id
-         WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
-         ORDER BY m.created_at DESC LIMIT 1`,
-      )
-      .get(caseId, prevKey) as { content: string } | undefined;
+    const lastMsg = await queryOne<{ content: string }>(
+      `SELECT m.content FROM messages m
+       INNER JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
+       ORDER BY m.created_at DESC LIMIT 1`,
+      [caseId, prevKey],
+    );
     if (lastMsg?.content) {
       q += `=== ${prevAgent.name} ===\n${lastMsg.content}\n\n`;
     }
@@ -711,15 +699,14 @@ function buildPriorFindingsQuestion(
 
 // Build a comprehensive summary of the 5-Why chain to pass to the Fishbone agent.
 // Gets all five_why messages (assistant + user) in ascending order and reconstructs each step.
-function buildFiveWhySummary(db: ReturnType<typeof getDb>, caseId: string): string {
-  const allMsgs = db
-    .prepare(
-      `SELECT m.role, m.content FROM messages m
-       INNER JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.rca_case_id = ? AND c.agent_key = 'five_why'
-       ORDER BY m.created_at ASC`,
-    )
-    .all(caseId) as { role: string; content: string }[];
+async function buildFiveWhySummary(caseId: string): Promise<string> {
+  const allMsgs = await query<{ role: string; content: string }>(
+    `SELECT m.role, m.content FROM messages m
+     INNER JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.rca_case_id = ? AND c.agent_key = 'five_why'
+     ORDER BY m.created_at ASC`,
+    [caseId],
+  );
 
   if (!allMsgs.length) return "";
 
@@ -797,21 +784,20 @@ export const sendAgentMessage = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
 
-    const convo = db
-      .prepare("SELECT id, user_id, agent_key, session_id, rca_case_id FROM conversations WHERE id = ?")
-      .get(data.conversationId) as
-      | Pick<ConversationRow, "id" | "user_id" | "agent_key" | "session_id" | "rca_case_id">
-      | undefined;
+    const convo = await queryOne<Pick<ConversationRow, "id" | "user_id" | "agent_key" | "session_id" | "rca_case_id">>(
+      "SELECT id, user_id, agent_key, session_id, rca_case_id FROM conversations WHERE id = ?",
+      [data.conversationId],
+    );
     if (!convo) throw new Error("Conversation not found");
     if (convo.user_id !== userId) throw new Error("Forbidden");
 
     let chatId = convo.session_id;
     if (convo.agent_key !== "data_collector" && convo.rca_case_id) {
-      const collector = db
-        .prepare("SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
-        .get(convo.rca_case_id) as { session_id: string } | undefined;
+      const collector = await queryOne<{ session_id: string }>(
+        "SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'",
+        [convo.rca_case_id],
+      );
       if (collector?.session_id) {
         chatId = collector.session_id;
       }
@@ -823,14 +809,16 @@ export const sendAgentMessage = createServerFn({ method: "POST" })
     // 1. Insert User Message
     const msgId = generateId();
     const attachJson = data.attachments ? JSON.stringify(data.attachments) : null;
-    db.prepare(
+    await execute(
       "INSERT INTO messages (id, conversation_id, role, content, attachments) VALUES (?, ?, 'user', ?, ?)",
-    ).run(msgId, data.conversationId, data.message, attachJson);
+      [msgId, data.conversationId, data.message, attachJson],
+    );
 
     // 2. Fetch full conversation history of current agent session
-    const currentMsgs = db
-      .prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
-      .all(data.conversationId) as { role: string; content: string }[];
+    const currentMsgs = await query<{ role: string; content: string }>(
+      "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+      [data.conversationId],
+    );
     
     // Construct history-aware question
     let prompt = "";
@@ -1008,13 +996,12 @@ export const sendAgentMessage = createServerFn({ method: "POST" })
           }
 
           const assistantMsgId = generateId();
-          db.prepare(
+          await execute(
             "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
-          ).run(assistantMsgId, convo.id, assistantText, JSON.stringify(parsedResponse));
-
-          db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(
-            convo.id,
+            [assistantMsgId, convo.id, assistantText, JSON.stringify(parsedResponse)],
           );
+
+          await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [convo.id]);
         } catch (err: any) {
           controller.error(err);
         } finally {
@@ -1067,7 +1054,6 @@ export const createRcaCase = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
     const id = generateId();
 
     const savedAttachments: { filename: string; contentType: string; url: string }[] = [];
@@ -1107,8 +1093,6 @@ export const createRcaCase = createServerFn({ method: "POST" })
       attachments: savedAttachments,
     };
 
-    // If pre-analyzed data was approved, merge it into incident_data
-    // so the RCA workspace can load all fields on first render
     if (data.preAnalyzedData) {
       incidentDataObj.problemStatement = data.preAnalyzedData.problemStatement || "";
       incidentDataObj.effect = data.preAnalyzedData.effect || "";
@@ -1122,33 +1106,32 @@ export const createRcaCase = createServerFn({ method: "POST" })
       incidentDataObj.witnessedSymptoms = data.preAnalyzedData.witnessedSymptoms || "";
     }
 
-    db.prepare(
+    await execute(
       "INSERT INTO rca_cases (id, user_id, title, asset_id, incident_data) VALUES (?, ?, ?, ?, ?)",
-    ).run(id, userId, data.title, data.assetId ?? null, JSON.stringify(incidentDataObj));
+      [id, userId, data.title, data.assetId ?? null, JSON.stringify(incidentDataObj)],
+    );
 
     if (data.preAnalyzedData) {
-      // 1. Create data_collector conversation
       const convoId = generateId();
       const sessionId = generateId();
-      db.prepare(
+      await execute(
         "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, 'data_collector', ?, ?, 'Data Collector & Validator')",
-      ).run(convoId, userId, sessionId, id);
-
-      // 2. Insert user message
+        [convoId, userId, sessionId, id],
+      );
       const userMsgId = generateId();
-      db.prepare(
+      await execute(
         "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
-      ).run(userMsgId, convoId, `[Auto-Pipeline Hypothesis Generation Request]`);
-
-      // 3. Insert assistant message with the pre-analyzed and approved details
+        [userMsgId, convoId, `[Auto-Pipeline Hypothesis Generation Request]`],
+      );
       const assistantMsgId = generateId();
       const content = JSON.stringify(data.preAnalyzedData, null, 2);
-      db.prepare(
+      await execute(
         "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
-      ).run(assistantMsgId, convoId, content, content);
+        [assistantMsgId, convoId, content, content],
+      );
     }
     
-    const row = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(id) as CaseRow;
+    const row = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [id]);
     return { case: row };
   });
 
@@ -1164,32 +1147,30 @@ export const ensureConversation = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
-    const existing = db
-      .prepare(
-        "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
-      )
-      .get(data.caseId, data.agentKey, userId) as ConversationRow | undefined;
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const existing = await queryOne<ConversationRow>(
+      "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+      [data.caseId, data.agentKey, userId],
+    );
     if (existing) return { conversation: existing };
 
     const agent = AGENT_BY_KEY[data.agentKey];
     const id = generateId();
     let sessionId = generateId();
     if (data.agentKey !== "data_collector") {
-      const collector = db
-        .prepare("SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
-        .get(data.caseId) as { session_id: string } | undefined;
+      const collector = await queryOne<{ session_id: string }>(
+        "SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'",
+        [data.caseId],
+      );
       if (collector?.session_id) {
         sessionId = collector.session_id;
       }
     }
-    db.prepare(
+    await execute(
       "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(id, userId, data.agentKey, sessionId, data.caseId, agent.name);
-    const created = db
-      .prepare("SELECT * FROM conversations WHERE id = ?")
-      .get(id) as ConversationRow;
+      [id, userId, data.agentKey, sessionId, data.caseId, agent.name],
+    );
+    const created = await queryOne<ConversationRow>("SELECT * FROM conversations WHERE id = ?", [id]);
     return { conversation: created };
   });
 
@@ -1198,33 +1179,26 @@ export const getCaseFull = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as
-      | CaseRow
-      | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
-    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
 
-    const conversations = db
-      .prepare(`
-        SELECT c.*, COUNT(m.id) as message_count
-        FROM conversations c
-        LEFT JOIN messages m ON c.id = m.conversation_id
-        WHERE c.rca_case_id = ?
-        GROUP BY c.id
-        ORDER BY c.created_at
-      `)
-      .all(data.caseId) as (ConversationRow & { message_count: number })[];
+    const conversations = await query<ConversationRow & { message_count: number }>(`
+      SELECT c.*, COUNT(m.id) as message_count
+      FROM conversations c
+      LEFT JOIN messages m ON c.id = m.conversation_id
+      WHERE c.rca_case_id = ?
+      GROUP BY c.id
+      ORDER BY c.created_at
+    `, [data.caseId]);
 
-    const collaborators = db
-      .prepare(`
-        SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
-        FROM case_collaborators cc
-        JOIN users u ON u.id = cc.user_id
-        WHERE cc.case_id = ?
-        ORDER BY cc.added_at ASC
-      `)
-      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+    const collaborators = await query<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>(`
+      SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
+      FROM case_collaborators cc
+      JOIN users u ON u.id = cc.user_id
+      WHERE cc.case_id = ?
+      ORDER BY cc.added_at ASC
+    `, [data.caseId]);
 
     const isOwner = rcaCase.user_id === userId;
     return { case: rcaCase, conversations, collaborators, isOwner };
@@ -1234,10 +1208,10 @@ export const getConversationMessages = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input) => z.object({ conversationId: z.string() }).parse(input))
   .handler(async ({ data }) => {
-    const db = getDb();
-    const messages = db
-      .prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at")
-      .all(data.conversationId) as MessageRow[];
+    const messages = await query<MessageRow>(
+      "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at",
+      [data.conversationId],
+    );
     return { messages };
   });
 
@@ -1245,33 +1219,33 @@ export const listMyCases = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
     const { userId } = context;
-    const db = getDb();
-    const owned = db
-      .prepare("SELECT *, 0 as is_collaborator FROM rca_cases WHERE user_id = ?")
-      .all(userId) as (CaseRow & { is_collaborator: number })[];
-    const collaborated = db
-      .prepare(`
-        SELECT r.*, 1 as is_collaborator
-        FROM rca_cases r
-        JOIN case_collaborators cc ON cc.case_id = r.id
-        WHERE cc.user_id = ? AND r.user_id != ?
-      `)
-      .all(userId, userId) as (CaseRow & { is_collaborator: number })[];
+    const owned = await query<CaseRow & { is_collaborator: number }>(
+      "SELECT *, 0 as is_collaborator FROM rca_cases WHERE user_id = ?",
+      [userId],
+    );
+    const collaborated = await query<CaseRow & { is_collaborator: number }>(`
+      SELECT r.*, 1 as is_collaborator
+      FROM rca_cases r
+      JOIN case_collaborators cc ON cc.case_id = r.id
+      WHERE cc.user_id = ? AND r.user_id != ?
+    `, [userId, userId]);
     const all = [...owned, ...collaborated].sort(
       (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
     );
 
-    const casesWithProgress = all.map((c) => {
-      const convos = db
-        .prepare("SELECT id, agent_key FROM conversations WHERE rca_case_id = ?")
-        .all(c.id) as { id: string; agent_key: string }[];
+    const casesWithProgress = await Promise.all(all.map(async (c) => {
+      const convos = await query<{ id: string; agent_key: string }>(
+        "SELECT id, agent_key FROM conversations WHERE rca_case_id = ?",
+        [c.id],
+      );
       
       const completedAgents = new Set<string>();
       for (const conv of convos) {
-        const msg = db
-          .prepare("SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?")
-          .get(conv.id) as { cnt: number };
-        if (msg.cnt > 0) {
+        const msg = await queryOne<{ cnt: number }>(
+          "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?",
+          [conv.id],
+        );
+        if (Number(msg?.cnt ?? 0) > 0) {
           completedAgents.add(conv.agent_key);
         }
       }
@@ -1280,20 +1254,13 @@ export const listMyCases = createServerFn({ method: "GET" })
       if (c.incident_data) {
         try {
           const parsed = JSON.parse(c.incident_data);
-          if (parsed.locked) {
-            editLocked = true;
-          }
+          if (parsed.locked) editLocked = true;
         } catch {}
       }
-      if (editLocked) {
-        completedAgents.add("data_collector");
-      }
+      if (editLocked) completedAgents.add("data_collector");
 
-      return {
-        ...c,
-        completed_agents: Array.from(completedAgents),
-      };
-    });
+      return { ...c, completed_agents: Array.from(completedAgents) };
+    }));
 
     return { cases: casesWithProgress };
   });
@@ -1303,13 +1270,13 @@ export const deleteCase = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
-    const existing = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as
-      | { user_id: string }
-      | undefined;
+    const existing = await queryOne<{ user_id: string }>(
+      "SELECT user_id FROM rca_cases WHERE id = ?",
+      [data.caseId],
+    );
     if (!existing) throw new Error("Case not found");
     if (existing.user_id !== userId) throw new Error("Forbidden");
-    db.prepare("DELETE FROM rca_cases WHERE id = ?").run(data.caseId);
+    await execute("DELETE FROM rca_cases WHERE id = ?", [data.caseId]);
     return { ok: true };
   });
 
@@ -1318,13 +1285,13 @@ export const clearConversationMessages = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ conversationId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
-    const existing = db
-      .prepare("SELECT user_id FROM conversations WHERE id = ?")
-      .get(data.conversationId) as { user_id: string } | undefined;
+    const existing = await queryOne<{ user_id: string }>(
+      "SELECT user_id FROM conversations WHERE id = ?",
+      [data.conversationId],
+    );
     if (!existing) throw new Error("Conversation not found");
     if (existing.user_id !== userId) throw new Error("Forbidden");
-    db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(data.conversationId);
+    await execute("DELETE FROM messages WHERE conversation_id = ?", [data.conversationId]);
     return { ok: true };
   });
 
@@ -1335,19 +1302,21 @@ export const truncateMessagesAfter = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
-    const conv = db
-      .prepare("SELECT user_id FROM conversations WHERE id = ?")
-      .get(data.conversationId) as { user_id: string } | undefined;
+    const conv = await queryOne<{ user_id: string }>(
+      "SELECT user_id FROM conversations WHERE id = ?",
+      [data.conversationId],
+    );
     if (!conv) throw new Error("Conversation not found");
     if (conv.user_id !== userId) throw new Error("Forbidden");
-    const msg = db
-      .prepare("SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?")
-      .get(data.afterMessageId, data.conversationId) as { created_at: string } | undefined;
+    const msg = await queryOne<{ created_at: string }>(
+      "SELECT created_at FROM messages WHERE id = ? AND conversation_id = ?",
+      [data.afterMessageId, data.conversationId],
+    );
     if (!msg) throw new Error("Message not found");
-    db.prepare(
+    await execute(
       "DELETE FROM messages WHERE conversation_id = ? AND created_at > ?",
-    ).run(data.conversationId, msg.created_at);
+      [data.conversationId, msg.created_at],
+    );
     return { ok: true };
   });
 
@@ -1358,18 +1327,19 @@ export const updateUserMessage = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
-    const conv = db
-      .prepare("SELECT user_id FROM conversations WHERE id = ?")
-      .get(data.conversationId) as { user_id: string } | undefined;
+    const conv = await queryOne<{ user_id: string }>(
+      "SELECT user_id FROM conversations WHERE id = ?",
+      [data.conversationId],
+    );
     if (!conv) throw new Error("Conversation not found");
     if (conv.user_id !== userId) throw new Error("Forbidden");
-    const msg = db
-      .prepare("SELECT id, role FROM messages WHERE id = ? AND conversation_id = ?")
-      .get(data.messageId, data.conversationId) as { id: string; role: string } | undefined;
+    const msg = await queryOne<{ id: string; role: string }>(
+      "SELECT id, role FROM messages WHERE id = ? AND conversation_id = ?",
+      [data.messageId, data.conversationId],
+    );
     if (!msg) throw new Error("Message not found");
     if (msg.role !== "user") throw new Error("Can only edit user messages");
-    db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(data.content, data.messageId);
+    await execute("UPDATE messages SET content = ? WHERE id = ?", [data.content, data.messageId]);
     return { ok: true };
   });
 
@@ -1384,12 +1354,11 @@ export const saveFinalReport = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const db = getDb();
-    db.prepare("UPDATE rca_cases SET final_report = ?, status = 'completed' WHERE id = ?").run(
-      JSON.stringify(data.report),
-      data.caseId,
+    await execute(
+      "UPDATE rca_cases SET final_report = ?, status = 'completed' WHERE id = ?",
+      [JSON.stringify(data.report), data.caseId],
     );
-    const row = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow;
+    const row = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     return { case: row };
   });
 
@@ -1405,14 +1374,12 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
 
     // 1. Ensure conversation exists
-    const convoRes = db
-      .prepare(
-        "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
-      )
-      .get(data.caseId, data.agentKey, userId) as ConversationRow | undefined;
+    const convoRes = await queryOne<ConversationRow>(
+      "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+      [data.caseId, data.agentKey, userId],
+    );
 
     let convo: ConversationRow;
     if (convoRes) {
@@ -1422,67 +1389,62 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
       const id = generateId();
       let sessionId = generateId();
       if (data.agentKey !== "data_collector") {
-        const collector = db
-          .prepare("SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
-          .get(data.caseId) as { session_id: string } | undefined;
-        if (collector?.session_id) {
-          sessionId = collector.session_id;
-        }
+        const collector = await queryOne<{ session_id: string }>(
+          "SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'",
+          [data.caseId],
+        );
+        if (collector?.session_id) sessionId = collector.session_id;
       }
-      db.prepare(
+      await execute(
         "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(id, userId, data.agentKey, sessionId, data.caseId, agent.name);
-      convo = db
-        .prepare("SELECT * FROM conversations WHERE id = ?")
-        .get(id) as ConversationRow;
+        [id, userId, data.agentKey, sessionId, data.caseId, agent.name],
+      );
+      convo = (await queryOne<ConversationRow>("SELECT * FROM conversations WHERE id = ?", [id]))!;
     }
 
     const agent = AGENT_BY_KEY[data.agentKey as AgentKey];
     if (!agent) throw new Error("Unknown agent");
 
-    // 2. Build the data-only question. System prompts (role/rules/schema) live on Forjinn.
+    // 2. Build the data-only question.
     const currentIdx = AGENT_KEYS.indexOf(data.agentKey);
     let prompt = "";
 
-    const rcaCase = db
-      .prepare("SELECT * FROM rca_cases WHERE id = ?")
-      .get(data.caseId) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
 
     if (data.agentKey === "data_collector") {
       prompt = buildDataCollectorQuestion(rcaCase);
     } else if (data.agentKey === "timeline") {
-      prompt = buildTimelineQuestion(db, data.caseId, rcaCase);
+      prompt = await buildTimelineQuestion(data.caseId, rcaCase);
     } else if (data.agentKey === "equipment") {
-      prompt = buildEquipmentQuestion(db, data.caseId, rcaCase);
+      prompt = await buildEquipmentQuestion(data.caseId, rcaCase);
     } else if (data.agentKey === "five_why") {
-      prompt = buildFiveWhyQuestion(db, data.caseId, rcaCase);
+      prompt = await buildFiveWhyQuestion(data.caseId, rcaCase);
     } else if (data.agentKey === "fishbone") {
-      const fiveWhySummary = buildFiveWhySummary(db, data.caseId);
-      prompt = buildFishboneQuestion(db, data.caseId, rcaCase, fiveWhySummary);
+      const fiveWhySummary = await buildFiveWhySummary(data.caseId);
+      prompt = await buildFishboneQuestion(data.caseId, rcaCase, fiveWhySummary);
     } else {
-      prompt = buildPriorFindingsQuestion(db, data.caseId, data.agentKey, currentIdx);
+      prompt = await buildPriorFindingsQuestion(data.caseId, data.agentKey, currentIdx);
     }
-
 
     // 3. Store system-pipeline user message in messages
     const msgId = generateId();
     const userMsgContent = (data.agentKey === "five_why" || data.agentKey === "fishbone") ? prompt : `[Auto-Pipeline Hypothesis Generation Request]`;
-    db.prepare(
+    await execute(
       "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
-    ).run(msgId, convo.id, userMsgContent);
+      [msgId, convo.id, userMsgContent],
+    );
 
     // Structured single-shot agents must not inherit stale session history from prior runs.
-    // Give them a fresh chatId every time; conversation agents (data_collector, five_why, fishbone)
-    // keep the shared collector session so context flows between turns.
     const STRUCTURED_AGENTS = ["timeline", "equipment", "fault_tree", "pareto", "report"];
     let chatId: string;
     if (STRUCTURED_AGENTS.includes(data.agentKey)) {
       chatId = `${convo.session_id}-${generateId()}`;
     } else if (convo.agent_key !== "data_collector" && convo.rca_case_id) {
-      const collector = db
-        .prepare("SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
-        .get(convo.rca_case_id) as { session_id: string } | undefined;
+      const collector = await queryOne<{ session_id: string }>(
+        "SELECT session_id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'",
+        [convo.rca_case_id],
+      );
       chatId = collector?.session_id ?? convo.session_id;
     } else {
       chatId = convo.session_id;
@@ -1587,13 +1549,12 @@ export const generateAgentHypothesis = createServerFn({ method: "POST" })
           }
 
           const assistantMsgId = generateId();
-          db.prepare(
+          await execute(
             "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
-          ).run(assistantMsgId, convo.id, assistantText, JSON.stringify(parsedResponse));
-
-          db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(
-            convo.id,
+            [assistantMsgId, convo.id, assistantText, JSON.stringify(parsedResponse)],
           );
+
+          await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [convo.id]);
         } catch (err: any) {
           controller.error(err);
         } finally {
@@ -1632,14 +1593,11 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
 
-    // 1. Fetch case to ensure it exists
-    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
-    if (!isCaseAccessible(db, data.caseId, userId, "user")) throw new Error("Forbidden");
+    if (!await isCaseAccessible(data.caseId, userId, "user")) throw new Error("Forbidden");
 
-    // 2. Parse current incident_data to keep attachments; save snapshot for history
     let attachments: any[] = [];
     if (rcaCase.incident_data) {
       try {
@@ -1648,12 +1606,12 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
       } catch {}
     }
 
-    // Save history snapshot before overwriting
     if (rcaCase.incident_data) {
       const histId = generateId();
-      db.prepare(
+      await execute(
         "INSERT INTO rca_edit_history (id, case_id, user_id, section, snapshot, summary) VALUES (?, ?, ?, 'incident_data', ?, ?)",
-      ).run(histId, data.caseId, userId, rcaCase.incident_data, "Updated incident details");
+        [histId, data.caseId, userId, rcaCase.incident_data, "Updated incident details"],
+      );
     }
 
     const updatedIncidentObj = {
@@ -1672,16 +1630,15 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
       maintenanceHistoryChecked: !!data.maintenanceHistoryChecked,
     };
 
-    // 3. Update the case record
-    db.prepare("UPDATE rca_cases SET incident_data = ? WHERE id = ?").run(
+    await execute("UPDATE rca_cases SET incident_data = ? WHERE id = ?", [
       JSON.stringify(updatedIncidentObj),
       data.caseId,
-    );
+    ]);
 
-    // 4. Update the latest assistant message of data_collector to feed subsequent steps
-    const collectorConvo = db
-      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'")
-      .get(data.caseId) as { id: string } | undefined;
+    const collectorConvo = await queryOne<{ id: string }>(
+      "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'data_collector'",
+      [data.caseId],
+    );
 
     const newContentObj = {
       problemStatement: data.problemStatement,
@@ -1699,36 +1656,33 @@ export const updateCaseIncidentData = createServerFn({ method: "POST" })
     const newContentStr = JSON.stringify(newContentObj, null, 2);
 
     if (collectorConvo) {
-      // Find latest assistant message
-      const latestMsg = db
-        .prepare("SELECT id FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
-        .get(collectorConvo.id) as { id: string } | undefined;
-
+      const latestMsg = await queryOne<{ id: string }>(
+        "SELECT id FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+        [collectorConvo.id],
+      );
       if (latestMsg) {
-        db.prepare("UPDATE messages SET content = ?, raw_response = ? WHERE id = ?").run(
-          newContentStr,
-          JSON.stringify(newContentObj),
-          latestMsg.id
-        );
+        await execute("UPDATE messages SET content = ?, raw_response = ? WHERE id = ?", [
+          newContentStr, JSON.stringify(newContentObj), latestMsg.id,
+        ]);
       } else {
-        // Create one if it didn't exist
         const msgId = generateId();
-        db.prepare(
-          "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)"
-        ).run(msgId, collectorConvo.id, newContentStr, JSON.stringify(newContentObj));
+        await execute(
+          "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
+          [msgId, collectorConvo.id, newContentStr, JSON.stringify(newContentObj)],
+        );
       }
     } else {
-      // Create conversation and message
       const convoId = generateId();
       const sessionId = generateId();
-      db.prepare(
-        "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, 'data_collector', ?, ?, 'Data Collector & Validator')"
-      ).run(convoId, userId, sessionId, data.caseId);
-
+      await execute(
+        "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, 'data_collector', ?, ?, 'Data Collector & Validator')",
+        [convoId, userId, sessionId, data.caseId],
+      );
       const msgId = generateId();
-      db.prepare(
-        "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)"
-      ).run(msgId, convoId, newContentStr, JSON.stringify(newContentObj));
+      await execute(
+        "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
+        [msgId, convoId, newContentStr, JSON.stringify(newContentObj)],
+      );
     }
 
     return { ok: true };
@@ -1747,16 +1701,11 @@ export const updateAssistantMessage = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const db = getDb();
     const rawResStr = data.rawResponse ? JSON.stringify(data.rawResponse) : data.content;
-    db.prepare("UPDATE messages SET content = ?, raw_response = ? WHERE id = ?").run(
-      data.content,
-      rawResStr,
-      data.messageId
-    );
-    db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(
-      data.conversationId
-    );
+    await execute("UPDATE messages SET content = ?, raw_response = ? WHERE id = ?", [
+      data.content, rawResStr, data.messageId,
+    ]);
+    await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [data.conversationId]);
     return { ok: true };
   });
 
@@ -1966,11 +1915,8 @@ export const runFullAutomation = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId } = context;
-    const db = getDb();
 
-    const rcaCase = db
-      .prepare("SELECT * FROM rca_cases WHERE id = ?")
-      .get(data.caseId) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId) throw new Error("Forbidden");
 
@@ -1989,11 +1935,10 @@ export const runFullAutomation = createServerFn({ method: "POST" })
             emit({ type: "agent_start", agent: agentKey, name: agent.name });
 
             // Ensure conversation exists
-            let convo = db
-              .prepare(
-                "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
-              )
-              .get(data.caseId, agentKey, userId) as ConversationRow | undefined;
+            let convo = await queryOne<ConversationRow>(
+              "SELECT * FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+              [data.caseId, agentKey, userId],
+            );
 
             if (!convo) {
               const convoId = generateId();
@@ -2001,12 +1946,11 @@ export const runFullAutomation = createServerFn({ method: "POST" })
               if (agentKey !== "data_collector" && collectorSessionId) {
                 sessionId = collectorSessionId;
               }
-              db.prepare(
+              await execute(
                 "INSERT INTO conversations (id, user_id, agent_key, session_id, rca_case_id, title) VALUES (?, ?, ?, ?, ?, ?)",
-              ).run(convoId, userId, agentKey, sessionId, data.caseId, agent.name);
-              convo = db
-                .prepare("SELECT * FROM conversations WHERE id = ?")
-                .get(convoId) as ConversationRow;
+                [convoId, userId, agentKey, sessionId, data.caseId, agent.name],
+              );
+              convo = (await queryOne<ConversationRow>("SELECT * FROM conversations WHERE id = ?", [convoId]))!;
             }
 
             if (agentKey === "data_collector") collectorSessionId = convo.session_id;
@@ -2016,12 +1960,11 @@ export const runFullAutomation = createServerFn({ method: "POST" })
               ? `${convo.session_id}-${generateId()}`
               : (collectorSessionId ?? convo.session_id);
 
-            // Skip if already has messages
-            const existingCount = (
-              db
-                .prepare("SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?")
-                .get(convo.id) as { cnt: number }
-            ).cnt;
+            const existingCountRow = await queryOne<{ cnt: number }>(
+              "SELECT COUNT(*) as cnt FROM messages WHERE conversation_id = ?",
+              [convo.id],
+            );
+            const existingCount = Number(existingCountRow?.cnt ?? 0);
 
             if (existingCount > 0) {
               emit({ type: "agent_skip", agent: agentKey, message: "Already analysed — skipping" });
@@ -2035,27 +1978,27 @@ export const runFullAutomation = createServerFn({ method: "POST" })
             if (agentKey === "data_collector") {
               prompt = buildDataCollectorQuestion(rcaCase);
             } else if (agentKey === "timeline") {
-              prompt = buildTimelineQuestion(db, data.caseId, rcaCase);
+              prompt = await buildTimelineQuestion(data.caseId, rcaCase);
             } else if (agentKey === "equipment") {
-              prompt = buildEquipmentQuestion(db, data.caseId, rcaCase);
+              prompt = await buildEquipmentQuestion(data.caseId, rcaCase);
             } else if (agentKey === "five_why") {
-              prompt = buildFiveWhyQuestion(db, data.caseId, rcaCase);
+              prompt = await buildFiveWhyQuestion(data.caseId, rcaCase);
             } else if (agentKey === "fishbone") {
-              const fiveWhySummary = buildFiveWhySummary(db, data.caseId);
-              prompt = buildFishboneQuestion(db, data.caseId, rcaCase, fiveWhySummary);
+              const fiveWhySummary = await buildFiveWhySummary(data.caseId);
+              prompt = await buildFishboneQuestion(data.caseId, rcaCase, fiveWhySummary);
             } else {
-              prompt = buildPriorFindingsQuestion(db, data.caseId, agentKey, currentIdx);
+              prompt = await buildPriorFindingsQuestion(data.caseId, agentKey, currentIdx);
             }
 
-            // Save user message
-            db.prepare(
+            await execute(
               "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
-            ).run(
-              generateId(),
-              convo.id,
-              agentKey === "five_why" || agentKey === "fishbone"
-                ? prompt
-                : "[Auto-Pipeline Hypothesis Generation Request]",
+              [
+                generateId(),
+                convo.id,
+                agentKey === "five_why" || agentKey === "fishbone"
+                  ? prompt
+                  : "[Auto-Pipeline Hypothesis Generation Request]",
+              ],
             );
 
             emit({ type: "agent_progress", agent: agentKey, step: 1, message: "Calling agent API…" });
@@ -2103,13 +2046,14 @@ export const runFullAutomation = createServerFn({ method: "POST" })
               emit({ type: "agent_progress", agent: agentKey, step: 1, message: `Could not obtain valid JSON after retries — saving raw text.` });
             }
 
-            db.prepare(
+            await execute(
               "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
-            ).run(
-              generateId(),
-              convo.id,
-              responseText,
-              JSON.stringify(parsed ?? { text: responseText }),
+              [
+                generateId(),
+                convo.id,
+                responseText,
+                JSON.stringify(parsed ?? { text: responseText }),
+              ],
             );
 
             // Multi-step AI-responder loop for five_why and fishbone
@@ -2123,19 +2067,18 @@ export const runFullAutomation = createServerFn({ method: "POST" })
               try { incidentData = JSON.parse(rcaCase.incident_data || "{}"); } catch {}
 
               // Build prior agent findings summary for responder
-              const buildPriorFindings = () => {
+              const buildPriorFindings = async () => {
                 let pf = "";
                 for (let i = 0; i < currentIdx; i++) {
                   const pk = AGENT_KEYS[i];
                   const pa = AGENT_BY_KEY[pk as AgentKey];
-                  const lm = db
-                    .prepare(
-                      `SELECT m.content FROM messages m
-                       INNER JOIN conversations c ON c.id = m.conversation_id
-                       WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
-                       ORDER BY m.created_at DESC LIMIT 1`,
-                    )
-                    .get(data.caseId, pk) as { content: string } | undefined;
+                  const lm = await queryOne<{ content: string }>(
+                    `SELECT m.content FROM messages m
+                     INNER JOIN conversations c ON c.id = m.conversation_id
+                     WHERE c.rca_case_id = ? AND c.agent_key = ? AND m.role = 'assistant'
+                     ORDER BY m.created_at DESC LIMIT 1`,
+                    [data.caseId, pk],
+                  );
                   if (lm?.content) pf += `=== ${pa?.name} ===\n${lm.content}\n\n`;
                 }
                 return pf;
@@ -2149,11 +2092,10 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                 iteration++;
 
                 // Fetch current conversation history for responder context
-                const historyMsgs = db
-                  .prepare(
-                    "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
-                  )
-                  .all(convo.id) as { role: string; content: string }[];
+                const historyMsgs = await query<{ role: string; content: string }>(
+                  "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                  [convo.id],
+                );
 
                 emit({
                   type: "agent_progress",
@@ -2171,7 +2113,7 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                   rcaCase.title,
                   rcaCase.asset_id,
                   historyMsgs,
-                  buildPriorFindings(),
+                  await buildPriorFindings(),
                 );
 
                 shouldFinalize = responder.proceedSignal === "finalize";
@@ -2184,10 +2126,10 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                   message: `[${responder.confidence}] ${autoAnswer.slice(0, 80)}…`,
                 });
 
-                // Save responder answer as operator message
-                db.prepare(
+                await execute(
                   "INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)",
-                ).run(generateId(), convo.id, autoAnswer);
+                  [generateId(), convo.id, autoAnswer],
+                );
 
                 if (shouldFinalize) break;
 
@@ -2211,22 +2153,21 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                   nextText = JSON.stringify(nextParsed, null, 2);
                 } catch {}
 
-                db.prepare(
+                await execute(
                   "INSERT INTO messages (id, conversation_id, role, content, raw_response) VALUES (?, ?, 'assistant', ?, ?)",
-                ).run(
-                  generateId(),
-                  convo.id,
-                  nextText,
-                  JSON.stringify(nextParsed ?? { text: nextText }),
+                  [
+                    generateId(),
+                    convo.id,
+                    nextText,
+                    JSON.stringify(nextParsed ?? { text: nextText }),
+                  ],
                 );
 
                 parsed = nextParsed;
               }
             }
 
-            db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(
-              convo.id,
-            );
+            await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [convo.id]);
 
             // After data_collector, persist structured findings to case incident_data
             if (agentKey === "data_collector" && parsed) {
@@ -2239,7 +2180,7 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                   existingAttachments = ex.attachments || [];
                 } catch {}
               }
-              db.prepare("UPDATE rca_cases SET incident_data = ? WHERE id = ?").run(
+              await execute("UPDATE rca_cases SET incident_data = ? WHERE id = ?", [
                 JSON.stringify({
                   description: existingDesc,
                   attachments: existingAttachments,
@@ -2256,22 +2197,22 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                   maintenanceHistoryChecked: false,
                 }),
                 data.caseId,
-              );
+              ]);
             }
 
             emit({ type: "agent_complete", agent: agentKey, name: agent.name });
           }
 
           // Persist the report agent's output to final_report and mark case completed
-          const reportConvo = db
-            .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?")
-            .get(data.caseId, userId) as { id: string } | undefined;
+          const reportConvo = await queryOne<{ id: string }>(
+            "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?",
+            [data.caseId, userId],
+          );
           if (reportConvo) {
-            const reportMsg = db
-              .prepare(
-                "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
-              )
-              .get(reportConvo.id) as { content: string; raw_response: string } | undefined;
+            const reportMsg = await queryOne<{ content: string; raw_response: string }>(
+              "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+              [reportConvo.id],
+            );
             if (reportMsg) {
               let reportParsed: any = null;
               for (const src of [reportMsg.raw_response, reportMsg.content]) {
@@ -2279,10 +2220,9 @@ export const runFullAutomation = createServerFn({ method: "POST" })
                 try { reportParsed = JSON.parse(src); break; } catch {}
               }
               if (reportParsed) {
-                db.prepare("UPDATE rca_cases SET final_report = ?, status = 'completed' WHERE id = ?").run(
-                  JSON.stringify(reportParsed),
-                  data.caseId,
-                );
+                await execute("UPDATE rca_cases SET final_report = ?, status = 'completed' WHERE id = ?", [
+                  JSON.stringify(reportParsed), data.caseId,
+                ]);
               }
             }
           }
@@ -2314,18 +2254,20 @@ export const runFullAutomation = createServerFn({ method: "POST" })
  * rcaReport output (+ incident_data), and load the first image attachment.
  * Single source of truth for all export formats.
  */
-async function buildCaseReport(db: ReturnType<typeof getDb>, caseId: string, userId: string) {
+async function buildCaseReport(caseId: string, userId: string) {
   let reportJson: any = null;
 
   // If userId is provided, try the specific user's conversation first
   if (userId) {
-    const convo = db
-      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?")
-      .get(caseId, userId) as { id: string } | undefined;
+    const convo = await queryOne<{ id: string }>(
+      "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' AND user_id = ?",
+      [caseId, userId],
+    );
     if (convo) {
-      const lastMsg = db
-        .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
-        .get(convo.id) as { content: string; raw_response: string } | undefined;
+      const lastMsg = await queryOne<{ content: string; raw_response: string }>(
+        "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+        [convo.id],
+      );
       if (lastMsg) {
         for (const src of [lastMsg.content, lastMsg.raw_response]) {
           if (!src) continue;
@@ -2338,13 +2280,15 @@ async function buildCaseReport(db: ReturnType<typeof getDb>, caseId: string, use
 
   // Fall back to any report conversation for this case (for public downloads or when user has no convo)
   if (!reportJson) {
-    const anyConvo = db
-      .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' ORDER BY created_at DESC LIMIT 1")
-      .get(caseId) as { id: string } | undefined;
+    const anyConvo = await queryOne<{ id: string }>(
+      "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = 'report' ORDER BY created_at DESC LIMIT 1",
+      [caseId],
+    );
     if (anyConvo) {
-      const lastMsg = db
-        .prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1")
-        .get(anyConvo.id) as { content: string; raw_response: string } | undefined;
+      const lastMsg = await queryOne<{ content: string; raw_response: string }>(
+        "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+        [anyConvo.id],
+      );
       if (lastMsg) {
         for (const src of [lastMsg.content, lastMsg.raw_response]) {
           if (!src) continue;
@@ -2357,15 +2301,19 @@ async function buildCaseReport(db: ReturnType<typeof getDb>, caseId: string, use
 
   // Last resort: use final_report stored on the case
   if (!reportJson) {
-    const caseRow = db.prepare("SELECT final_report FROM rca_cases WHERE id = ?").get(caseId) as { final_report: string | null } | undefined;
+    const caseRow = await queryOne<{ final_report: string | null }>(
+      "SELECT final_report FROM rca_cases WHERE id = ?",
+      [caseId],
+    );
     if (caseRow?.final_report) {
       try { reportJson = JSON.parse(caseRow.final_report); } catch {}
     }
   }
 
-  const rcaCase = db
-    .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
-    .get(caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+  const rcaCase = await queryOne<{ title: string; asset_id: string | null; incident_data: string | null }>(
+    "SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?",
+    [caseId],
+  );
 
   let incidentMeta: any = {};
   if (rcaCase?.incident_data) {
@@ -2373,7 +2321,11 @@ async function buildCaseReport(db: ReturnType<typeof getDb>, caseId: string, use
   }
 
   const { normalizeReport } = await import("./rca.report");
-  const report = normalizeReport(reportJson || {}, incidentMeta, rcaCase || {});
+  const report = normalizeReport(
+    reportJson || {},
+    incidentMeta,
+    rcaCase ? { title: rcaCase.title, asset_id: rcaCase.asset_id ?? undefined } : undefined,
+  );
 
   // Load the first image attachment for embedding.
   let image: { buffer: Buffer; extension: "png" | "jpeg" | "gif" } | undefined;
@@ -2446,9 +2398,8 @@ export const downloadRcaReport = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context as { userId: string };
-    const db = getDb();
 
-    const { report, image, imageDataUri, rcaCase } = await buildCaseReport(db, data.caseId, userId);
+    const { report, image, imageDataUri, rcaCase } = await buildCaseReport(data.caseId, userId);
     const base = `RCA-Report-${rcaCase?.asset_id || data.caseId}`;
     const { generateRcaXlsx, generateRcaDocx, generateRcaHtml } = await import("./rca.report");
 
@@ -2492,19 +2443,25 @@ export const exportFullAnalysis = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     const { userId } = context as { userId: string };
-    const db = getDb();
 
     // Full 8-step HTML (charts/bars/diagrams) — driven by per-agent data + normalizers.
     if (data.format === "html-full") {
-      const rcaCase0 = db
-        .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
-        .get(data.caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+      const rcaCase0 = await queryOne<{ title: string; asset_id: string | null; incident_data: string | null }>(
+        "SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?",
+        [data.caseId],
+      );
       if (!rcaCase0) throw new Error("Case not found");
 
-      const lastMsgJson = (agentKey: string): any => {
-        const c = db.prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?").get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      const lastMsgJson = async (agentKey: string): Promise<any> => {
+        const c = await queryOne<{ id: string }>(
+          "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+          [data.caseId, agentKey, userId],
+        );
         if (!c) return {};
-        const m = db.prepare("SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1").get(c.id) as { content: string; raw_response: string } | undefined;
+        const m = await queryOne<{ content: string; raw_response: string }>(
+          "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+          [c.id],
+        );
         if (!m) return {};
         for (const src of [m.content, m.raw_response]) {
           if (!src) continue;
@@ -2513,14 +2470,25 @@ export const exportFullAnalysis = createServerFn({ method: "POST" })
         }
         return {};
       };
-      const allMsgs = (agentKey: string) => {
-        const c = db.prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?").get(data.caseId, agentKey, userId) as { id: string } | undefined;
+      const allMsgs = async (agentKey: string): Promise<any[]> => {
+        const c = await queryOne<{ id: string }>(
+          "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+          [data.caseId, agentKey, userId],
+        );
         if (!c) return [];
-        const msgs = db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC").all(c.id) as Array<{ role: string; content: string }>;
-        return msgs.map((m) => { let parsed: any = null; const j = extractFirstJsonString(m.content) ?? m.content; try { parsed = JSON.parse(j); } catch {} return { role: m.role, content: m.content, parsed }; });
+        const msgs = await query<{ role: string; content: string }>(
+          "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+          [c.id],
+        );
+        return msgs.map((m) => {
+          let parsed: any = null;
+          const j = extractFirstJsonString(m.content) ?? m.content;
+          try { parsed = JSON.parse(j); } catch {}
+          return { role: m.role, content: m.content, parsed };
+        });
       };
 
-      const collector = lastMsgJson("data_collector");
+      const collector = await lastMsgJson("data_collector");
       let incidentMeta: any = {};
       try { incidentMeta = JSON.parse(rcaCase0.incident_data || "{}"); } catch {}
       for (const k of ["problemStatement", "effect", "equipmentName", "location", "operatingConditions", "timestamp", "witnessedSymptoms", "gaps", "followUps"]) {
@@ -2530,16 +2498,16 @@ export const exportFullAnalysis = createServerFn({ method: "POST" })
       const { generateFullStepsHtml } = await import("./rca.fullhtml");
       const html = generateFullStepsHtml({
         caseTitle: rcaCase0.title,
-        assetId: rcaCase0.asset_id,
+        assetId: rcaCase0.asset_id ?? undefined,
         generatedAt: new Date().toLocaleString("en-IN", { dateStyle: "long", timeStyle: "short" }),
         collector,
-        fiveWhyMessages: allMsgs("five_why"),
-        fishbone: lastMsgJson("fishbone"),
-        faultTree: lastMsgJson("fault_tree"),
-        pareto: lastMsgJson("pareto"),
-        timeline: lastMsgJson("timeline"),
-        equipment: lastMsgJson("equipment"),
-        report: lastMsgJson("report"),
+        fiveWhyMessages: await allMsgs("five_why"),
+        fishbone: await lastMsgJson("fishbone"),
+        faultTree: await lastMsgJson("fault_tree"),
+        pareto: await lastMsgJson("pareto"),
+        timeline: await lastMsgJson("timeline"),
+        equipment: await lastMsgJson("equipment"),
+        report: await lastMsgJson("report"),
       });
       return {
         base64: Buffer.from(html, "utf-8").toString("base64"),
@@ -2549,7 +2517,7 @@ export const exportFullAnalysis = createServerFn({ method: "POST" })
     }
 
     // Drive the remaining formats from the same canonical HZL report model.
-    const { report, image, imageDataUri, rcaCase } = await buildCaseReport(db, data.caseId, userId);
+    const { report, image, imageDataUri, rcaCase } = await buildCaseReport(data.caseId, userId);
     const base = `RCA-Full-Analysis-${rcaCase?.asset_id || data.caseId}`;
     const { generateRcaHtml, generateRcaDocx } = await import("./rca.report");
 
@@ -2575,24 +2543,24 @@ export const getCombinedAnalysis = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId } = context as { userId: string };
-    const db = getDb();
 
-    const rcaCase = db
-      .prepare("SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?")
-      .get(data.caseId) as { title: string; asset_id: string; incident_data: string } | undefined;
+    const rcaCase = await queryOne<{ title: string; asset_id: string | null; incident_data: string | null }>(
+      "SELECT title, asset_id, incident_data FROM rca_cases WHERE id = ?",
+      [data.caseId],
+    );
 
     if (!rcaCase) throw new Error("Case not found");
 
-    const getAgentLastMsg = (agentKey: string): any => {
-      const convo = db
-        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
-        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+    const getAgentLastMsg = async (agentKey: string): Promise<any> => {
+      const convo = await queryOne<{ id: string }>(
+        "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+        [data.caseId, agentKey, userId],
+      );
       if (!convo) return null;
-      const msg = db
-        .prepare(
-          "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
-        )
-        .get(convo.id) as { content: string; raw_response: string } | undefined;
+      const msg = await queryOne<{ content: string; raw_response: string }>(
+        "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+        [convo.id],
+      );
       if (!msg) return null;
       for (const src of [msg.content, msg.raw_response]) {
         if (!src) continue;
@@ -2602,14 +2570,16 @@ export const getCombinedAnalysis = createServerFn({ method: "POST" })
       return { text: msg.content };
     };
 
-    const getAllMsgs = (agentKey: string) => {
-      const convo = db
-        .prepare("SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?")
-        .get(data.caseId, agentKey, userId) as { id: string } | undefined;
+    const getAllMsgs = async (agentKey: string) => {
+      const convo = await queryOne<{ id: string }>(
+        "SELECT id FROM conversations WHERE rca_case_id = ? AND agent_key = ? AND user_id = ?",
+        [data.caseId, agentKey, userId],
+      );
       if (!convo) return [];
-      const msgs = db
-        .prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC")
-        .all(convo.id) as Array<{ role: string; content: string }>;
+      const msgs = await query<{ role: string; content: string }>(
+        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+        [convo.id],
+      );
       return msgs.map((m) => {
         let parsed: any = null;
         const j = extractFirstJsonString(m.content) ?? m.content;
@@ -2618,7 +2588,7 @@ export const getCombinedAnalysis = createServerFn({ method: "POST" })
       });
     };
 
-    const collector = getAgentLastMsg("data_collector") || {};
+    const collector = (await getAgentLastMsg("data_collector")) || {};
     // Fill missing collector fields from incident_data
     if (rcaCase.incident_data) {
       try {
@@ -2633,13 +2603,13 @@ export const getCombinedAnalysis = createServerFn({ method: "POST" })
       caseTitle: rcaCase.title,
       assetId: rcaCase.asset_id || "",
       collector,
-      fiveWhyMessages: getAllMsgs("five_why"),
-      fishbone: getAgentLastMsg("fishbone") || {},
-      faultTree: getAgentLastMsg("fault_tree") || {},
-      pareto: getAgentLastMsg("pareto") || {},
-      timeline: getAgentLastMsg("timeline") || {},
-      equipment: getAgentLastMsg("equipment") || {},
-      report: getAgentLastMsg("report") || {},
+      fiveWhyMessages: await getAllMsgs("five_why"),
+      fishbone: (await getAgentLastMsg("fishbone")) || {},
+      faultTree: (await getAgentLastMsg("fault_tree")) || {},
+      pareto: (await getAgentLastMsg("pareto")) || {},
+      timeline: (await getAgentLastMsg("timeline")) || {},
+      equipment: (await getAgentLastMsg("equipment")) || {},
+      report: (await getAgentLastMsg("report")) || {},
     };
   });
 
@@ -2652,8 +2622,7 @@ export const toggleCasePublic = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
     if (rcaCase.status !== "completed") throw new Error("Only completed RCAs can be made public");
@@ -2663,25 +2632,25 @@ export const toggleCasePublic = createServerFn({ method: "POST" })
     if (willBePublic && !slug) {
       slug = generatePublicSlug();
       // Ensure uniqueness
-      while (db.prepare("SELECT id FROM rca_cases WHERE public_slug = ?").get(slug)) {
+      while (await queryOne("SELECT id FROM rca_cases WHERE public_slug = ?", [slug])) {
         slug = generatePublicSlug();
       }
     }
-    db.prepare("UPDATE rca_cases SET is_public = ?, public_slug = ? WHERE id = ?").run(
+    await execute("UPDATE rca_cases SET is_public = ?, public_slug = ? WHERE id = ?", [
       willBePublic ? 1 : 0,
       slug,
       data.caseId,
-    );
+    ]);
     return { is_public: willBePublic, public_slug: slug };
   });
 
 export const getPublicCase = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ slug: z.string() }).parse(input))
   .handler(async ({ data }) => {
-    const db = getDb();
-    const rcaCase = db
-      .prepare("SELECT * FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'")
-      .get(data.slug) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>(
+      "SELECT * FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'",
+      [data.slug],
+    );
     if (!rcaCase) return null;
     return {
       id: rcaCase.id,
@@ -2698,12 +2667,12 @@ export const getPublicCase = createServerFn({ method: "POST" })
 export const downloadPublicReport = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ slug: z.string(), format: z.enum(["xlsx", "docx", "pdf", "html"]) }).parse(input))
   .handler(async ({ data }) => {
-    const db = getDb();
-    const row = db
-      .prepare("SELECT id, title, asset_id FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'")
-      .get(data.slug) as { id: string; title: string; asset_id: string } | undefined;
+    const row = await queryOne<{ id: string; title: string; asset_id: string | null }>(
+      "SELECT id, title, asset_id FROM rca_cases WHERE public_slug = ? AND is_public = 1 AND status = 'completed'",
+      [data.slug],
+    );
     if (!row) throw new Error("Not found");
-    const { report, image, imageDataUri } = await buildCaseReport(db, row.id, "");
+    const { report, image, imageDataUri } = await buildCaseReport(row.id, "");
     const base = `RCA-Report-${row.asset_id || row.id}`;
     const { generateRcaXlsx, generateRcaDocx, generateRcaHtml } = await import("./rca.report");
     if (data.format === "xlsx") {
@@ -2731,17 +2700,17 @@ export const listCollaborators = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
-    const collabs = db
-      .prepare(`
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const collabs = await query<any>(
+      `
         SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
         FROM case_collaborators cc
         JOIN users u ON u.id = cc.user_id
         WHERE cc.case_id = ?
         ORDER BY cc.added_at ASC
-      `)
-      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+      `,
+      [data.caseId],
+    );
     return { collaborators: collabs };
   });
 
@@ -2750,33 +2719,33 @@ export const listUsersForCollaboration = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    const rcaCase = await queryOne<{ user_id: string }>("SELECT user_id FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
 
     // Accepted users (have accounts), excluding case owner and existing collaborators
-    const accepted = db
-      .prepare(`
+    const accepted = await query<any>(
+      `
         SELECT u.id, u.email, u.full_name
         FROM users u
         WHERE u.id != ?
           AND u.id NOT IN (SELECT user_id FROM case_collaborators WHERE case_id = ?)
         ORDER BY u.full_name, u.email
-      `)
-      .all(rcaCase.user_id, data.caseId) as Array<{ id: string; email: string; full_name: string | null }>;
+      `,
+      [rcaCase.user_id, data.caseId],
+    );
 
     // Pending invites (email-specific, not yet used)
-    const invited = db
-      .prepare(`
+    const invited = await query<any>(
+      `
         SELECT code, email, created_at, expires_at
         FROM invites
         WHERE used_at IS NULL
-          AND expires_at > datetime('now')
+          AND expires_at > NOW()
           AND email IS NOT NULL
         ORDER BY created_at DESC
-      `)
-      .all() as Array<{ code: string; email: string; created_at: string; expires_at: string }>;
+      `,
+    );
 
     return { accepted, invited };
   });
@@ -2786,35 +2755,37 @@ export const addCollaborator = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string(), targetUserId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    const rcaCase = await queryOne<{ user_id: string }>("SELECT user_id FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
     if (data.targetUserId === rcaCase.user_id) throw new Error("Owner is already the case owner");
 
-    const targetUser = db.prepare("SELECT id, email, full_name FROM users WHERE id = ?").get(data.targetUserId) as
-      | { id: string; email: string; full_name: string | null }
-      | undefined;
+    const targetUser = await queryOne<{ id: string; email: string; full_name: string | null }>(
+      "SELECT id, email, full_name FROM users WHERE id = ?",
+      [data.targetUserId],
+    );
     if (!targetUser) throw new Error("User not found");
 
     try {
       const id = generateId();
-      db.prepare(
+      await execute(
         "INSERT INTO case_collaborators (id, case_id, user_id, added_by) VALUES (?, ?, ?, ?)",
-      ).run(id, data.caseId, data.targetUserId, userId);
+        [id, data.caseId, data.targetUserId, userId],
+      );
     } catch {
       // UNIQUE constraint — already a collaborator, silently ignore
     }
 
-    const collabs = db
-      .prepare(`
+    const collabs = await query<any>(
+      `
         SELECT cc.id, cc.user_id, cc.added_at, u.full_name, u.email
         FROM case_collaborators cc
         JOIN users u ON u.id = cc.user_id
         WHERE cc.case_id = ?
         ORDER BY cc.added_at ASC
-      `)
-      .all(data.caseId) as Array<{ id: string; user_id: string; added_at: string; full_name: string | null; email: string }>;
+      `,
+      [data.caseId],
+    );
     return { collaborators: collabs };
   });
 
@@ -2823,11 +2794,10 @@ export const removeCollaborator = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string(), collaboratorUserId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT user_id FROM rca_cases WHERE id = ?").get(data.caseId) as { user_id: string } | undefined;
+    const rcaCase = await queryOne<{ user_id: string }>("SELECT user_id FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
-    db.prepare("DELETE FROM case_collaborators WHERE case_id = ? AND user_id = ?").run(data.caseId, data.collaboratorUserId);
+    await execute("DELETE FROM case_collaborators WHERE case_id = ? AND user_id = ?", [data.caseId, data.collaboratorUserId]);
     return { ok: true };
   });
 
@@ -2840,10 +2810,9 @@ export const getEditHistory = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    if (!isCaseAccessible(db, data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
-    const history = db
-      .prepare(`
+    if (!await isCaseAccessible(data.caseId, userId, user?.role ?? "user")) throw new Error("Forbidden");
+    const history = await query<any>(
+      `
         SELECT h.id, h.case_id, h.user_id, h.section, h.summary, h.changed_at,
                u.full_name, u.email
         FROM rca_edit_history h
@@ -2851,11 +2820,9 @@ export const getEditHistory = createServerFn({ method: "POST" })
         WHERE h.case_id = ?
         ORDER BY h.changed_at DESC
         LIMIT 100
-      `)
-      .all(data.caseId) as Array<{
-        id: string; case_id: string; user_id: string; section: string;
-        summary: string | null; changed_at: string; full_name: string | null; email: string;
-      }>;
+      `,
+      [data.caseId],
+    );
     return { history };
   });
 
@@ -2864,25 +2831,26 @@ export const revertEditVersion = createServerFn({ method: "POST" })
   .inputValidator((input) => z.object({ caseId: z.string(), historyId: z.string() }).parse(input))
   .handler(async ({ data, context }) => {
     const { userId, user } = context;
-    const db = getDb();
-    const rcaCase = db.prepare("SELECT * FROM rca_cases WHERE id = ?").get(data.caseId) as CaseRow | undefined;
+    const rcaCase = await queryOne<CaseRow>("SELECT * FROM rca_cases WHERE id = ?", [data.caseId]);
     if (!rcaCase) throw new Error("Case not found");
     if (rcaCase.user_id !== userId && user?.role !== "admin") throw new Error("Forbidden");
 
-    const histEntry = db
-      .prepare("SELECT section, snapshot FROM rca_edit_history WHERE id = ? AND case_id = ?")
-      .get(data.historyId, data.caseId) as { section: string; snapshot: string | null } | undefined;
+    const histEntry = await queryOne<{ section: string; snapshot: string | null }>(
+      "SELECT section, snapshot FROM rca_edit_history WHERE id = ? AND case_id = ?",
+      [data.historyId, data.caseId],
+    );
     if (!histEntry || !histEntry.snapshot) throw new Error("History entry not found or has no snapshot");
 
     if (histEntry.section === "incident_data") {
       // Save current state as a new history entry first
       if (rcaCase.incident_data) {
         const newHistId = generateId();
-        db.prepare(
+        await execute(
           "INSERT INTO rca_edit_history (id, case_id, user_id, section, snapshot, summary) VALUES (?, ?, ?, 'incident_data', ?, ?)",
-        ).run(newHistId, data.caseId, userId, rcaCase.incident_data, "Reverted to earlier version");
+          [newHistId, data.caseId, userId, rcaCase.incident_data, "Reverted to earlier version"],
+        );
       }
-      db.prepare("UPDATE rca_cases SET incident_data = ? WHERE id = ?").run(histEntry.snapshot, data.caseId);
+      await execute("UPDATE rca_cases SET incident_data = ? WHERE id = ?", [histEntry.snapshot, data.caseId]);
     }
     return { ok: true };
   });

@@ -5,6 +5,7 @@ import {
   signup as doSignup,
   invalidateSession,
   signupWithInvite,
+  getInviteByCode,
   verifyInviteCode,
   changePassword,
 } from "@/lib/auth";
@@ -45,7 +46,7 @@ export const signoutFn = createServerFn({ method: "POST" }).handler(async () => 
   const cookie = request?.headers.get("cookie") || "";
   const token = (cookie.match(/auth_token=([^;]+)/) || [])[1];
   if (token) {
-    invalidateSession(decodeURIComponent(token));
+    await invalidateSession(decodeURIComponent(token));
   }
   return { ok: true };
 });
@@ -53,8 +54,9 @@ export const signoutFn = createServerFn({ method: "POST" }).handler(async () => 
 export const validateInviteCodeFn = createServerFn({ method: "GET" })
   .inputValidator((input) => z.object({ code: z.string() }).parse(input))
   .handler(async ({ data }) => {
-    const invite = verifyInviteCode(data.code);
-    return invite;
+    const invite = await getInviteByCode(data.code);
+    if (!invite) throw new Error("Invalid invite code");
+    return verifyInviteCode(invite);
   });
 
 export const signupWithInviteFn = createServerFn({ method: "POST" })

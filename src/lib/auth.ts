@@ -1,4 +1,4 @@
-import { getDb, generateId } from "./database";
+import { query, queryOne, execute, generateId, initializeSchema } from "./database";
 import bcryptPkg from "bcryptjs";
 import jwtPkg from "jsonwebtoken";
 const { compare, hash } = bcryptPkg;
@@ -37,66 +37,59 @@ export async function signup(
   password: string,
   fullName?: string,
 ): Promise<{ user: AuthUser; token: string }> {
-  const db = getDb();
+  await initializeSchema();
 
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email) as
-    | Record<string, unknown>
-    | undefined;
-  if (existing) {
-    throw new Error("Email already registered");
-  }
+  const existing = await queryOne("SELECT id FROM users WHERE email = ?", [email]);
+  if (existing) throw new Error("Email already registered");
 
   const passwordHash = await hash(password, 10);
   const id = generateId();
 
-  const result = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-  const role = result.count === 0 ? "admin" : "user";
+  const countRow = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM users");
+  const role = (countRow?.count ?? 0) === 0 ? "admin" : "user";
 
-  db.prepare(
+  await execute(
     "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, email, passwordHash, fullName || null, role);
+    [id, email, passwordHash, fullName || null, role],
+  );
 
-  const token = createToken(id);
-  createSession(id, token);
+  const token = await createToken(id);
+  await createSession(id, token);
 
-  return {
-    user: { id, email, fullName: fullName || null, role },
-    token,
-  };
+  return { user: { id, email, fullName: fullName || null, role: role as "admin" | "user" }, token };
 }
 
 export async function signin(
   email: string,
   password: string,
 ): Promise<{ user: AuthUser; token: string }> {
-  const db = getDb();
+  await initializeSchema();
 
-  const userRow = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as
-    | DbUser
-    | undefined;
-  if (!userRow) {
-    throw new Error("Invalid email or password");
-  }
+  const userRow = await queryOne<DbUser>("SELECT * FROM users WHERE email = ?", [email]);
+  if (!userRow) throw new Error("Invalid email or password");
 
   const valid = await compare(password, userRow.password_hash);
-  if (!valid) {
-    throw new Error("Invalid email or password");
-  }
+  if (!valid) throw new Error("Invalid email or password");
 
-  const token = createToken(userRow.id);
-  createSession(userRow.id, token);
+  const token = await createToken(userRow.id);
+  await createSession(userRow.id, token);
 
   return {
-    user: { id: userRow.id, email: userRow.email, fullName: userRow.full_name, role: userRow.role },
+    user: {
+      id: userRow.id,
+      email: userRow.email,
+      fullName: userRow.full_name,
+      role: userRow.role,
+    },
     token,
   };
 }
 
-export function createToken(userId: string): string {
-  const db = getDb();
-  const userRow = db
-    .prepare("SELECT email, full_name, role FROM users WHERE id = ?")
-    .get(userId) as { email: string; full_name: string | null; role: string } | undefined;
+export async function createToken(userId: string): Promise<string> {
+  const userRow = await queryOne<{ email: string; full_name: string | null; role: string }>(
+    "SELECT email, full_name, role FROM users WHERE id = ?",
+    [userId],
+  );
   return sign(
     {
       sub: userId,
@@ -109,38 +102,39 @@ export function createToken(userId: string): string {
   );
 }
 
-export function createSession(userId: string, token: string) {
-  const db = getDb();
+export async function createSession(userId: string, token: string): Promise<void> {
   const id = generateId();
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare(
-    "INSERT OR REPLACE INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)",
-  ).run(id, userId, token, expiresAt);
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+  // Upsert: if same user_id already has a session, replace it
+  await execute(
+    "INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE token = VALUES(token), expires_at = VALUES(expires_at)",
+    [id, userId, token, expiresAt],
+  );
 }
 
-export function invalidateSession(token: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+export async function invalidateSession(token: string): Promise<void> {
+  await execute("DELETE FROM sessions WHERE token = ?", [token]);
 }
 
-export function getSessionUser(token: string): AuthUser | null {
-  const db = getDb();
-  const session = db.prepare("SELECT * FROM sessions WHERE token = ?").get(token) as
-    | DbSession
-    | undefined;
+export async function getSessionUser(token: string): Promise<AuthUser | null> {
+  await initializeSchema();
+
+  const session = await queryOne<DbSession>("SELECT * FROM sessions WHERE token = ?", [token]);
   if (!session) return null;
 
   const exp = new Date(session.expires_at);
   if (exp < new Date()) {
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(session.id);
+    await execute("DELETE FROM sessions WHERE id = ?", [session.id]);
     return null;
   }
 
-  const userRow = db
-    .prepare("SELECT id, email, full_name, role FROM users WHERE id = ?")
-    .get(session.user_id) as
-    | { id: string; email: string; full_name: string | null; role: string }
-    | undefined;
+  const userRow = await queryOne<{ id: string; email: string; full_name: string | null; role: string }>(
+    "SELECT id, email, full_name, role FROM users WHERE id = ?",
+    [session.user_id],
+  );
   return userRow
     ? {
         id: userRow.id,
@@ -151,16 +145,12 @@ export function getSessionUser(token: string): AuthUser | null {
     : null;
 }
 
-export async function changeUserRole(userId: string, role: "admin" | "user") {
-  const db = getDb();
-  await Promise.resolve();
-  db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, userId);
+export async function changeUserRole(userId: string, role: "admin" | "user"): Promise<void> {
+  await execute("UPDATE users SET role = ? WHERE id = ?", [role, userId]);
 }
 
-export function deleteUser(userId: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
-  db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+export function deleteUser(userId: string): Promise<void> {
+  return execute("DELETE FROM users WHERE id = ?", [userId]).then(() => undefined);
 }
 
 export interface DbUserRow {
@@ -173,45 +163,32 @@ export interface DbUserRow {
   agentUsage: Array<{ agent_key: string; count: number }>;
 }
 
-export function getAllUsers(): DbUserRow[] {
-  const db = getDb();
-  const users = db
-    .prepare(
-      "SELECT id, email, full_name as fullName, role, created_at FROM users ORDER BY created_at DESC",
-    )
-    .all() as Array<{
+export async function getAllUsers(): Promise<DbUserRow[]> {
+  const users = await query<{
     id: string;
     email: string;
     fullName: string | null;
     role: string;
     created_at: string;
-  }>;
-  const caseCounts = db
-    .prepare("SELECT user_id, COUNT(*) as cnt FROM rca_cases GROUP BY user_id")
-    .all() as Array<{ user_id: string; cnt: number }>;
+  }>("SELECT id, email, full_name as fullName, role, created_at FROM users ORDER BY created_at DESC");
+
+  const caseCounts = await query<{ user_id: string; cnt: number }>(
+    "SELECT user_id, COUNT(*) as cnt FROM rca_cases GROUP BY user_id",
+  );
   const countMap = new Map(caseCounts.map((c) => [c.user_id, c.cnt]));
 
-  const agentUsageList = db
-    .prepare(
-      `
-    SELECT user_id, agent_key, COUNT(*) as cnt 
-    FROM conversations 
-    GROUP BY user_id, agent_key
-  `,
-    )
-    .all() as Array<{ user_id: string; agent_key: string; cnt: number }>;
-
+  const agentUsageList = await query<{ user_id: string; agent_key: string; cnt: number }>(
+    "SELECT user_id, agent_key, COUNT(*) as cnt FROM conversations GROUP BY user_id, agent_key",
+  );
   const agentUsageMap = new Map<string, Array<{ agent_key: string; count: number }>>();
   for (const item of agentUsageList) {
-    if (!agentUsageMap.has(item.user_id)) {
-      agentUsageMap.set(item.user_id, []);
-    }
-    agentUsageMap.get(item.user_id)!.push({ agent_key: item.agent_key, count: item.cnt });
+    if (!agentUsageMap.has(item.user_id)) agentUsageMap.set(item.user_id, []);
+    agentUsageMap.get(item.user_id)!.push({ agent_key: item.agent_key, count: Number(item.cnt) });
   }
 
   return users.map((u) => ({
     ...u,
-    caseCount: countMap.get(u.id) || 0,
+    caseCount: countMap.get(u.id) ? Number(countMap.get(u.id)) : 0,
     agentUsage: agentUsageMap.get(u.id) || [],
   }));
 }
@@ -225,32 +202,23 @@ export interface DbAnalytics {
   agentUsage: Array<{ agent_key: string; count: number }>;
 }
 
-export function getAnalytics(): DbAnalytics {
-  const db = getDb();
-  const userCount = (db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number })
-    .count;
-  const caseCount = (
-    db.prepare("SELECT COUNT(*) as count FROM rca_cases").get() as { count: number }
-  ).count;
-  const completedCount = (
-    db.prepare("SELECT COUNT(*) as count FROM rca_cases WHERE status = 'completed'").get() as {
-      count: number;
-    }
-  ).count;
-  const convCount = (
-    db.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number }
-  ).count;
-  const msgCount = (db.prepare("SELECT COUNT(*) as count FROM messages").get() as { count: number })
-    .count;
-  const agentUsage = db
-    .prepare("SELECT agent_key, COUNT(*) as count FROM conversations GROUP BY agent_key")
-    .all() as Array<{ agent_key: string; count: number }>;
+export async function getAnalytics(): Promise<DbAnalytics> {
+  const [userCount, caseCount, completedCount, convCount, msgCount, agentUsage] = await Promise.all([
+    queryOne<{ count: number }>("SELECT COUNT(*) as count FROM users"),
+    queryOne<{ count: number }>("SELECT COUNT(*) as count FROM rca_cases"),
+    queryOne<{ count: number }>("SELECT COUNT(*) as count FROM rca_cases WHERE status = 'completed'"),
+    queryOne<{ count: number }>("SELECT COUNT(*) as count FROM conversations"),
+    queryOne<{ count: number }>("SELECT COUNT(*) as count FROM messages"),
+    query<{ agent_key: string; count: number }>(
+      "SELECT agent_key, COUNT(*) as count FROM conversations GROUP BY agent_key",
+    ),
+  ]);
   return {
-    userCount,
-    caseCount,
-    completedCount,
-    conversationCount: convCount,
-    messageCount: msgCount,
+    userCount: Number(userCount?.count ?? 0),
+    caseCount: Number(caseCount?.count ?? 0),
+    completedCount: Number(completedCount?.count ?? 0),
+    conversationCount: Number(convCount?.count ?? 0),
+    messageCount: Number(msgCount?.count ?? 0),
     agentUsage,
   };
 }
@@ -264,18 +232,8 @@ export interface DbCaseRow {
   owner: { email: string | null; fullName: string | null };
 }
 
-export function getAllCases(): DbCaseRow[] {
-  const db = getDb();
-  const cases = db
-    .prepare(
-      `
-    SELECT c.id, c.title, c.asset_id, c.status, c.created_at, u.email as owner_email, u.full_name as owner_name
-    FROM rca_cases c
-    LEFT JOIN users u ON c.user_id = u.id
-    ORDER BY c.created_at DESC
-  `,
-    )
-    .all() as Array<{
+export async function getAllCases(): Promise<DbCaseRow[]> {
+  const cases = await query<{
     id: string;
     title: string;
     asset_id: string | null;
@@ -283,7 +241,12 @@ export function getAllCases(): DbCaseRow[] {
     created_at: string;
     owner_email: string | null;
     owner_name: string | null;
-  }>;
+  }>(`
+    SELECT c.id, c.title, c.asset_id, c.status, c.created_at, u.email as owner_email, u.full_name as owner_name
+    FROM rca_cases c
+    LEFT JOIN users u ON c.user_id = u.id
+    ORDER BY c.created_at DESC
+  `);
   return cases.map((c) => ({
     ...c,
     owner: { email: c.owner_email, fullName: c.owner_name },
@@ -296,29 +259,34 @@ export async function adminCreateUser(
   fullName: string,
   role: "admin" | "user",
 ): Promise<AuthUser> {
-  const db = getDb();
-  const existing = db.prepare("SELECT id FROM users WHERE email = ?").get(email);
-  if (existing) {
-    throw new Error("Email already registered");
-  }
+  const existing = await queryOne("SELECT id FROM users WHERE email = ?", [email]);
+  if (existing) throw new Error("Email already registered");
   const passwordHash = await hash(password, 10);
   const id = generateId();
-  db.prepare(
+  await execute(
     "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, email, passwordHash, fullName || null, role);
+    [id, email, passwordHash, fullName || null, role],
+  );
   return { id, email, fullName: fullName || null, role };
 }
 
-export function createInvite(email: string | null, role: "admin" | "user", createdBy: string) {
-  const db = getDb();
+export async function createInvite(
+  email: string | null,
+  role: "admin" | "user",
+  createdBy: string,
+): Promise<{ code: string; expiresAt: string }> {
   const code =
     Math.random().toString(36).substring(2, 10).toUpperCase() +
     "-" +
     Math.random().toString(36).substring(2, 6).toUpperCase();
-  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
-  db.prepare(
+  const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace("T", " ");
+  await execute(
     "INSERT INTO invites (code, email, role, created_by, expires_at) VALUES (?, ?, ?, ?, ?)",
-  ).run(code, email || null, role, createdBy, expiresAt);
+    [code, email || null, role, createdBy, expiresAt],
+  );
   return { code, expiresAt };
 }
 
@@ -334,40 +302,29 @@ export interface DbInvite {
   creator_email?: string | null;
 }
 
-export function getInvites(): DbInvite[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `
-    SELECT i.*, u.email as creator_email 
+export async function getInvites(): Promise<DbInvite[]> {
+  return query<DbInvite>(`
+    SELECT i.*, u.email as creator_email
     FROM invites i
     LEFT JOIN users u ON i.created_by = u.id
     ORDER BY i.created_at DESC
-  `,
-    )
-    .all() as DbInvite[];
+  `);
 }
 
-export function deleteInvite(code: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM invites WHERE code = ?").run(code);
+export async function deleteInvite(code: string): Promise<void> {
+  await execute("DELETE FROM invites WHERE code = ?", [code]);
 }
 
-export function verifyInviteCode(code: string): { email: string | null; role: string } {
-  const db = getDb();
-  const invite = db.prepare("SELECT * FROM invites WHERE code = ?").get(code) as
-    | DbInvite
-    | undefined;
-  if (!invite) {
-    throw new Error("Invalid invite code");
-  }
-  if (invite.used_at) {
-    throw new Error("This invite code has already been used");
-  }
-  if (new Date(invite.expires_at) < new Date()) {
-    throw new Error("This invite code has expired");
-  }
+export function verifyInviteCode(invite: DbInvite): { email: string | null; role: string } {
+  if (invite.used_at) throw new Error("This invite code has already been used");
+  if (new Date(invite.expires_at) < new Date()) throw new Error("This invite code has expired");
   return { email: invite.email, role: invite.role };
+}
+
+export async function getInviteByCode(code: string): Promise<DbInvite | null> {
+  const invite = await queryOne<DbInvite>("SELECT * FROM invites WHERE code = ?", [code]);
+  if (!invite) throw new Error("Invalid invite code");
+  return invite;
 }
 
 export async function signupWithInvite(
@@ -375,50 +332,47 @@ export async function signupWithInvite(
   email: string,
   password: string,
   fullName: string,
-) {
-  const db = getDb();
-  const verified = verifyInviteCode(code);
+): Promise<{ user: AuthUser; token: string }> {
+  const invite = await getInviteByCode(code);
+  if (!invite) throw new Error("Invalid invite code");
+  const verified = verifyInviteCode(invite);
   if (verified.email && verified.email.toLowerCase() !== email.toLowerCase()) {
     throw new Error("This invite code is restricted to a different email address");
   }
 
-  // Create user using our signup method
   const result = await signup(email, password, fullName);
 
-  // If the invite specified a different role (e.g. admin), update user role
   if (verified.role !== result.user.role) {
-    db.prepare("UPDATE users SET role = ? WHERE id = ?").run(verified.role, result.user.id);
+    await execute("UPDATE users SET role = ? WHERE id = ?", [verified.role, result.user.id]);
     result.user.role = verified.role as "admin" | "user";
   }
 
-  // Mark invite as used
-  db.prepare("UPDATE invites SET used_at = datetime('now'), used_by = ? WHERE code = ?").run(
-    result.user.id,
-    code,
+  await execute(
+    "UPDATE invites SET used_at = NOW(), used_by = ? WHERE code = ?",
+    [result.user.id, code],
   );
 
   return result;
 }
 
-export async function adminResetPassword(userId: string, newPassword: string) {
-  const db = getDb();
+export async function adminResetPassword(userId: string, newPassword: string): Promise<void> {
   const passwordHash = await hash(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, userId);
-  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  await execute("UPDATE users SET password_hash = ? WHERE id = ?", [passwordHash, userId]);
+  await execute("DELETE FROM sessions WHERE user_id = ?", [userId]);
 }
 
-export async function changePassword(userId: string, oldPassword: string, newPassword: string) {
-  const db = getDb();
-  const user = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(userId) as
-    | { password_hash: string }
-    | undefined;
-  if (!user) {
-    throw new Error("User not found");
-  }
+export async function changePassword(
+  userId: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const user = await queryOne<{ password_hash: string }>(
+    "SELECT password_hash FROM users WHERE id = ?",
+    [userId],
+  );
+  if (!user) throw new Error("User not found");
   const valid = await compare(oldPassword, user.password_hash);
-  if (!valid) {
-    throw new Error("Incorrect current password");
-  }
+  if (!valid) throw new Error("Incorrect current password");
   const passwordHash = await hash(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(passwordHash, userId);
+  await execute("UPDATE users SET password_hash = ? WHERE id = ?", [passwordHash, userId]);
 }

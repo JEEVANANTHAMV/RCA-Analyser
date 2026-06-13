@@ -21,7 +21,7 @@ export const requireAuth = createMiddleware({ type: "function" }).server(async (
     throw new Error("Unauthorized: No authentication token provided");
   }
 
-  const user = getSessionUser(token);
+  const user = await getSessionUser(token);
   if (!user) {
     throw new Error("Unauthorized: Invalid or expired token");
   }

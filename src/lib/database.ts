@@ -1,6 +1,4 @@
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+import mysql from "mysql2/promise";
 import bcryptPkg from "bcryptjs";
 const { hashSync: bcryptHashSync } = bcryptPkg;
 
@@ -11,185 +9,210 @@ function genUuid(): string {
   });
 }
 
-const DB_PATH = process.env.DATABASE_PATH || "./data/app.db";
-
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!_db) {
-    const dir = path.dirname(DB_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    _db = new Database(DB_PATH);
-    _db.pragma("journal_mode = WAL");
-    _db.pragma("foreign_keys = ON");
-    initializeTables();
-  }
-  return _db;
-}
-
-function runMigrations(db: Database.Database) {
-  // Add new columns to rca_cases (ignore errors if already exist)
-  for (const sql of [
-    "ALTER TABLE rca_cases ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE rca_cases ADD COLUMN public_slug TEXT",
-  ]) {
-    try { db.exec(sql); } catch { /* column already exists */ }
-  }
-
-  // New collaboration and history tables
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS case_collaborators (
-      id TEXT PRIMARY KEY,
-      case_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      added_by TEXT NOT NULL,
-      added_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE CASCADE,
-      UNIQUE(case_id, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS rca_edit_history (
-      id TEXT PRIMARY KEY,
-      case_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      section TEXT NOT NULL,
-      snapshot TEXT,
-      summary TEXT,
-      changed_at TEXT NOT NULL DEFAULT (datetime('now')),
-      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_collaborators_case ON case_collaborators(case_id);
-    CREATE INDEX IF NOT EXISTS idx_collaborators_user ON case_collaborators(user_id);
-    CREATE INDEX IF NOT EXISTS idx_edit_history_case ON rca_edit_history(case_id, changed_at);
-  `);
-}
-
-function initializeTables() {
-  const db = getDb();
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      full_name TEXT,
-      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      token TEXT UNIQUE NOT NULL,
-      expires_at TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      foreign key (user_id) references users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS rca_cases (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      title TEXT NOT NULL,
-      asset_id TEXT,
-      status TEXT NOT NULL DEFAULT 'in_progress' CHECK(status IN ('in_progress', 'completed', 'archived')),
-      incident_data TEXT,
-      final_report TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      foreign key (user_id) references users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS conversations (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      agent_key TEXT NOT NULL,
-      session_id TEXT NOT NULL DEFAULT (lower(hex(randomblob(8)))),
-      title TEXT,
-      incident_context TEXT,
-      rca_case_id TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      foreign key (user_id) references users(id) ON DELETE CASCADE,
-      foreign key (rca_case_id) references rca_cases(id) ON DELETE CASCADE,
-      UNIQUE(rca_case_id, agent_key, user_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      conversation_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
-      content TEXT NOT NULL,
-      raw_response TEXT,
-      attachments TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      foreign key (conversation_id) references conversations(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_conversations_case ON conversations(rca_case_id);
-    CREATE INDEX IF NOT EXISTS idx_rca_cases_user ON rca_cases(user_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
-    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-
-    CREATE TRIGGER IF NOT EXISTS update_users_timestamp AFTER UPDATE ON users
-    BEGIN
-      UPDATE users SET updated_at = datetime('now') WHERE id = NEW.id;
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS update_cases_timestamp AFTER UPDATE ON rca_cases
-    BEGIN
-      UPDATE rca_cases SET updated_at = datetime('now') WHERE id = NEW.id;
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS update_conversations_timestamp AFTER UPDATE ON conversations
-    BEGIN
-      UPDATE conversations SET updated_at = datetime('now') WHERE id = NEW.id;
-    END;
-
-    CREATE TABLE IF NOT EXISTS invites (
-      code TEXT PRIMARY KEY,
-      email TEXT,
-      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
-      created_by TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      expires_at TEXT NOT NULL,
-      used_at TEXT,
-      used_by TEXT,
-      foreign key (created_by) references users(id) ON DELETE CASCADE,
-      foreign key (used_by) references users(id) ON DELETE SET NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_invites_code ON invites(code);
-  `);
-
-  runMigrations(db);
-
-  const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
-  if (userCount.count === 0) {
-    const adminHash = bcryptHashSync("admin123", 10);
-    db.prepare(
-      "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
-    ).run(generateId(), "admin@rca.local", adminHash, "Admin User");
-
-    const supportHash = bcryptHashSync("Psgcas@12", 10);
-    db.prepare(
-      "INSERT INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
-    ).run(generateId(), "support@innosynth.org", supportHash, "Support Admin");
-  }
-}
-
 export function generateId(): string {
   return genUuid();
 }
 
-export function cleanExpiredSessions() {
-  const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE expires_at < datetime('now')").run();
+// ─── Connection pool ──────────────────────────────────────────────────────────
+
+let _pool: mysql.Pool | null = null;
+
+export function getPool(): mysql.Pool {
+  if (!_pool) {
+    _pool = mysql.createPool({
+      host: process.env.DATABASE_HOST || "172.17.0.1",
+      port: parseInt(process.env.DATABASE_PORT || "3306", 10),
+      user: process.env.DATABASE_USER || "forjinn",
+      password: process.env.DATABASE_PASSWORD || "Psgcasmcom@12",
+      database: process.env.DATABASE_NAME || "vedanta",
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      charset: "utf8mb4",
+      timezone: "+00:00",
+    });
+  }
+  return _pool;
+}
+
+// ─── Query helpers ────────────────────────────────────────────────────────────
+
+/** SELECT multiple rows */
+export async function query<T = any>(sql: string, params?: any[]): Promise<T[]> {
+  const [rows] = await getPool().execute(sql, params ?? []);
+  return rows as T[];
+}
+
+/** SELECT one row (or null) */
+export async function queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
+  const rows = await query<T>(sql, params);
+  return rows[0] ?? null;
+}
+
+/** INSERT / UPDATE / DELETE */
+export async function execute(sql: string, params?: any[]): Promise<mysql.ResultSetHeader> {
+  const [result] = await getPool().execute(sql, params ?? []);
+  return result as mysql.ResultSetHeader;
+}
+
+// ─── Schema initialisation ────────────────────────────────────────────────────
+
+let _initialised = false;
+
+export async function initializeSchema(): Promise<void> {
+  if (_initialised) return;
+  _initialised = true;
+
+  const pool = getPool();
+
+  // Core tables
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+      id VARCHAR(36) PRIMARY KEY,
+      email VARCHAR(255) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      full_name TEXT,
+      role ENUM('admin','user') NOT NULL DEFAULT 'user',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      token TEXT NOT NULL,
+      expires_at DATETIME NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS rca_cases (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      title TEXT NOT NULL,
+      asset_id TEXT,
+      status ENUM('in_progress','completed','archived') NOT NULL DEFAULT 'in_progress',
+      incident_data LONGTEXT,
+      final_report LONGTEXT,
+      is_public TINYINT(1) NOT NULL DEFAULT 0,
+      public_slug VARCHAR(50),
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      id VARCHAR(36) PRIMARY KEY,
+      user_id VARCHAR(36) NOT NULL,
+      agent_key VARCHAR(100) NOT NULL,
+      session_id VARCHAR(100) NOT NULL,
+      title TEXT,
+      incident_context LONGTEXT,
+      rca_case_id VARCHAR(36),
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (rca_case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      UNIQUE KEY uq_conversation (rca_case_id, agent_key, user_id)
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id VARCHAR(36) PRIMARY KEY,
+      conversation_id VARCHAR(36) NOT NULL,
+      role ENUM('user','assistant','system') NOT NULL,
+      content LONGTEXT NOT NULL,
+      raw_response LONGTEXT,
+      attachments LONGTEXT,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS invites (
+      code VARCHAR(50) PRIMARY KEY,
+      email VARCHAR(255),
+      role ENUM('admin','user') NOT NULL DEFAULT 'user',
+      created_by VARCHAR(36) NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL,
+      used_at DATETIME,
+      used_by VARCHAR(36),
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS case_collaborators (
+      id VARCHAR(36) PRIMARY KEY,
+      case_id VARCHAR(36) NOT NULL,
+      user_id VARCHAR(36) NOT NULL,
+      added_by VARCHAR(36) NOT NULL,
+      added_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE KEY uq_collaborator (case_id, user_id)
+    ) CHARACTER SET utf8mb4
+  `);
+
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS rca_edit_history (
+      id VARCHAR(36) PRIMARY KEY,
+      case_id VARCHAR(36) NOT NULL,
+      user_id VARCHAR(36) NOT NULL,
+      section VARCHAR(100) NOT NULL,
+      snapshot LONGTEXT,
+      summary TEXT,
+      changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) CHARACTER SET utf8mb4
+  `);
+
+  // Indexes (CREATE INDEX IF NOT EXISTS not supported in older MySQL — use IF NOT EXISTS workaround)
+  const indexes = [
+    "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_conversations_case ON conversations(rca_case_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rca_cases_user ON rca_cases(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token(255))",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_collaborators_case ON case_collaborators(case_id)",
+    "CREATE INDEX IF NOT EXISTS idx_collaborators_user ON case_collaborators(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_edit_history_case ON rca_edit_history(case_id, changed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_invites_code ON invites(code)",
+  ];
+  for (const idx of indexes) {
+    try { await pool.execute(idx); } catch { /* index already exists */ }
+  }
+
+  // Seed default admin users if no users exist
+  const [countRows] = await pool.execute("SELECT COUNT(*) as count FROM users") as any;
+  const userCount = countRows[0].count as number;
+  if (userCount === 0) {
+    const adminHash = bcryptHashSync("admin123", 10);
+    await pool.execute(
+      "INSERT IGNORE INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
+      [generateId(), "admin@rca.local", adminHash, "Admin User"],
+    );
+    const supportHash = bcryptHashSync("Psgcas@12", 10);
+    await pool.execute(
+      "INSERT IGNORE INTO users (id, email, password_hash, full_name, role) VALUES (?, ?, ?, ?, 'admin')",
+      [generateId(), "support@innosynth.org", supportHash, "Support Admin"],
+    );
+  }
+}
+
+export async function cleanExpiredSessions(): Promise<void> {
+  await execute("DELETE FROM sessions WHERE expires_at < NOW()");
 }

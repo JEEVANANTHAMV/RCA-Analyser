@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireAuth } from "@/lib/auth-middleware";
-import { getDb } from "@/lib/database";
+import { query, queryOne, execute } from "@/lib/database";
 import {
   getAllUsers,
   getAnalytics,
@@ -26,7 +26,7 @@ export const adminListUsers = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const users = getAllUsers();
+    const users = await getAllUsers();
     return { users };
   });
 
@@ -35,7 +35,7 @@ export const adminListAllCases = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const cases = getAllCases();
+    const cases = await getAllCases();
     return { cases };
   });
 
@@ -44,7 +44,7 @@ export const adminAnalytics = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const stats = getAnalytics();
+    const stats = await getAnalytics();
     return stats;
   });
 
@@ -54,8 +54,7 @@ export const adminDeleteCase = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const db = getDb();
-    db.prepare("DELETE FROM rca_cases WHERE id = ?").run(data.caseId);
+    await execute("DELETE FROM rca_cases WHERE id = ?", [data.caseId]);
     return { ok: true };
   });
 
@@ -86,7 +85,7 @@ export const adminDeleteUser = createServerFn({ method: "POST" })
     const { user } = context;
     await assertAdmin(user);
     if (data.targetUserId === user.id) throw new Error("Cannot delete yourself");
-    deleteUser(data.targetUserId);
+    await deleteUser(data.targetUserId);
     return { ok: true };
   });
 
@@ -104,27 +103,19 @@ export const adminGenerateInvite = createServerFn({ method: "POST" })
     const { user } = context;
     await assertAdmin(user);
 
-    // Check for existing active (unused and unexpired) invite for the same email
-    const db = getDb();
-    const existing = db
-      .prepare(
-        "SELECT code FROM invites WHERE email = ? AND used_at IS NULL AND datetime(expires_at) > datetime('now')",
-      )
-      .get(data.email) as { code: string } | undefined;
-
+    const existing = await queryOne(
+      "SELECT code FROM invites WHERE email = ? AND used_at IS NULL AND expires_at > NOW()",
+      [data.email],
+    );
     if (existing) {
       throw new Error(
         "An active invitation already exists for this email address. Please resend the existing invitation instead.",
       );
     }
 
-    const invite = createInvite(data.email, data.role, user.id);
+    const invite = await createInvite(data.email, data.role, user.id);
     try {
-      await sendInvitationEmail({
-        to: data.email,
-        code: invite.code,
-        role: data.role,
-      });
+      await sendInvitationEmail({ to: data.email, code: invite.code, role: data.role });
       return { invite, emailSent: true };
     } catch (err) {
       console.error("Failed to send invitation email during generation:", err);
@@ -142,20 +133,13 @@ export const adminResendInvite = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const db = getDb();
-    const invite = db.prepare("SELECT * FROM invites WHERE code = ?").get(data.code) as
-      | DbInvite
-      | undefined;
+    const invite = await queryOne<DbInvite>("SELECT * FROM invites WHERE code = ?", [data.code]);
     if (!invite) throw new Error("Invite not found");
     if (invite.used_at) throw new Error("This invite has already been used");
     if (new Date(invite.expires_at) < new Date()) throw new Error("This invite code has expired");
     if (!invite.email) throw new Error("No recipient email specified for this invite");
 
-    await sendInvitationEmail({
-      to: invite.email,
-      code: invite.code,
-      role: invite.role,
-    });
+    await sendInvitationEmail({ to: invite.email, code: invite.code, role: invite.role });
     return { ok: true };
   });
 
@@ -185,12 +169,8 @@ export const adminBulkGenerateInvites = createServerFn({ method: "POST" })
         continue;
       }
       try {
-        const invite = createInvite(email, data.role, user.id);
-        await sendInvitationEmail({
-          to: email,
-          code: invite.code,
-          role: data.role,
-        });
+        const invite = await createInvite(email, data.role, user.id);
+        await sendInvitationEmail({ to: email, code: invite.code, role: data.role });
         results.push({ email, code: invite.code, ok: true });
       } catch {
         results.push({ email, code: "", ok: false });
@@ -199,13 +179,12 @@ export const adminBulkGenerateInvites = createServerFn({ method: "POST" })
     return { results };
   });
 
-
 export const adminListInvites = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
     const { user } = context;
     await assertAdmin(user);
-    const invites = getInvites();
+    const invites = await getInvites();
     return { invites };
   });
 
@@ -215,7 +194,7 @@ export const adminDeleteInvite = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { user } = context;
     await assertAdmin(user);
-    deleteInvite(data.code);
+    await deleteInvite(data.code);
     return { ok: true };
   });
 
