@@ -359,7 +359,9 @@ function CasePage() {
 
   // Fault Tree States
   const [faultTree, setFaultTree] = useState<any>(null);
-  const [selectedFTAEvent, setSelectedFTAEvent] = useState<any>(null);
+  const [selectedFTAEventId, setSelectedFTAEventId] = useState<string | null>(null);
+  const [cutSetTab, setCutSetTab] = useState<"live" | "ai">("live");
+  const [sensitivityTab, setSensitivityTab] = useState<"live" | "ai">("live");
 
   // Pareto States
   const [paretoThreshold, setParetoThreshold] = useState(80);
@@ -3986,10 +3988,145 @@ function CasePage() {
           );
         }
 
-        const updateFTNode = (nodeId: string, key: string, value: any) => {
+        const findNodeById = (node: any, id: string): any => {
+          if (!node) return null;
+          if (node.id === id) return node;
+          if (node.children) {
+            for (const c of node.children) {
+              const found = findNodeById(c, id);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+
+        const computeLayout = (node: any) => {
+          if (!node) return { coords: {} as Record<string, { x: number; y: number }>, svgW: 900, svgH: 400 };
+
+          const coords: Record<string, { x: number; y: number }> = {};
+          let leafCount = 0;
+          let maxDepth = 0;
+
+          const assignCoords = (n: any, depth: number) => {
+            if (!n) return;
+            if (depth > maxDepth) maxDepth = depth;
+            const y = 60 + depth * 130;
+            const children = n.children || [];
+
+            if (children.length === 0) {
+              const x = 110 + leafCount * 190;
+              leafCount++;
+              coords[n.id] = { x, y };
+            } else {
+              children.forEach((c: any) => assignCoords(c, depth + 1));
+              const firstX = coords[children[0].id].x;
+              const lastX = coords[children[children.length - 1].id].x;
+              const x = (firstX + lastX) / 2;
+              coords[n.id] = { x, y };
+            }
+          };
+
+          assignCoords(node, 0);
+
+          if (leafCount === 0) {
+            coords[node.id] = { x: 450, y: 60 };
+            return { coords, svgW: 900, svgH: 220 };
+          }
+
+          const svgW = Math.max(900, leafCount * 190 + 220);
+          const svgH = Math.max(400, 120 + maxDepth * 130);
+
+          const calculatedWidth = leafCount * 190 + 220;
+          if (calculatedWidth < 900) {
+            const shift = (900 - calculatedWidth) / 2;
+            Object.keys(coords).forEach(id => {
+              coords[id].x += shift;
+            });
+          }
+
+          return { coords, svgW, svgH };
+        };
+
+        const computeMinimalCutSets = (node: any): string[][] => {
+          const getCutSets = (n: any): string[][] => {
+            if (!n) return [];
+            if (n.type === "event") {
+              return [[n.id]];
+            }
+            const children = n.children || [];
+            if (children.length === 0) return [];
+
+            const childSets = children.map((c: any) => getCutSets(c));
+
+            if (n.gateType === "OR") {
+              return childSets.flat(1);
+            } else if (n.gateType === "AND") {
+              let current: string[][] = [[]];
+              for (const sets of childSets) {
+                if (sets.length === 0) continue;
+                const next: string[][] = [];
+                for (const c of current) {
+                  for (const s of sets) {
+                    next.push([...c, ...s]);
+                  }
+                }
+                current = next;
+              }
+              return current;
+            } else if (n.gateType === "NOT") {
+              return childSets.flat(1);
+            }
+            return [];
+          };
+
+          const rawSets = getCutSets(node);
+
+          const cleaned = rawSets.map(set => Array.from(new Set(set)).sort());
+
+          const uniqueSets: string[][] = [];
+          const seen = new Set<string>();
+          for (const set of cleaned) {
+            if (set.length === 0) continue;
+            const key = set.join("||");
+            if (!seen.has(key)) {
+              seen.add(key);
+              uniqueSets.push(set);
+            }
+          }
+
+          uniqueSets.sort((a, b) => a.length - b.length);
+          const minimalSets: string[][] = [];
+          for (const set of uniqueSets) {
+            let isMinimal = true;
+            for (const m of minimalSets) {
+              if (m.every(val => set.includes(val))) {
+                isMinimal = false;
+                break;
+              }
+            }
+            if (isMinimal) {
+              minimalSets.push(set);
+            }
+          }
+
+          return minimalSets;
+        };
+
+        const getBasicEvents = (node: any, list: any[] = []): any[] => {
+          if (!node) return list;
+          if (node.type === "event") {
+            list.push(node);
+          }
+          if (node.children) {
+            node.children.forEach((c: any) => getBasicEvents(c, list));
+          }
+          return list;
+        };
+
+        const updateFTNode = (nodeId: string, updates: Record<string, any>) => {
           const deepUpdate = (currNode: any): any => {
             if (currNode.id === nodeId) {
-              return { ...currNode, [key]: value };
+              return { ...currNode, ...updates };
             }
             if (currNode.children) {
               return { ...currNode, children: currNode.children.map((c: any) => deepUpdate(c)) };
@@ -4023,12 +4160,16 @@ function CasePage() {
           setFaultTree(deepAdd(faultTree));
           setIsDirty(true);
           toast.success("Child node added!");
+          setSelectedFTAEventId(newId);
         };
 
         const deleteFTNode = (nodeId: string) => {
           if (nodeId === "top-event") {
             toast.error("Cannot delete top event");
             return;
+          }
+          if (selectedFTAEventId === nodeId) {
+            setSelectedFTAEventId(null);
           }
           const deepRemove = (currNode: any): any => {
             if (currNode.children) {
@@ -4058,8 +4199,7 @@ function CasePage() {
         const calculateProbabilities = (node: any): any => {
           if (!node) return null;
           if (node.type === "event") {
-            // Keep AI-provided probability; default to 0.1 so gates don't collapse to 0
-            return { ...node, probability: node.probability > 0 ? node.probability : 0.1 };
+            return { ...node, probability: typeof node.probability === "number" ? node.probability : 0.1 };
           }
 
           const calculatedChildren = (node.children || []).map((c: any) => calculateProbabilities(c));
@@ -4076,8 +4216,6 @@ function CasePage() {
             }
           }
 
-          // If the computed probability is 0 but the AI provided a meaningful value, use the AI's value.
-          // This prevents the diagram going blank when the model assigned conceptual probabilities to gate nodes.
           const finalProb = (prob > 0) ? prob : (node.probability > 0 ? node.probability : 0);
 
           return {
@@ -4088,115 +4226,129 @@ function CasePage() {
         };
 
         const computedTree = calculateProbabilities(faultTree);
-
-        const computeSensitivity = (node: any, topProb: number, list: any[] = []) => {
-          if (!node) return;
-          if (node.type === "event") {
-            const fv = topProb > 0 ? (node.probability / topProb) : 0.0;
-            list.push({ label: node.label, probability: node.probability, fv: parseFloat((fv * 100).toFixed(1)) });
-          }
-          if (node.children) {
-            node.children.forEach((c: any) => computeSensitivity(c, topProb, list));
-          }
-          return list;
-        };
+        const selectedFTAEvent = selectedFTAEventId ? findNodeById(computedTree, selectedFTAEventId) : null;
 
         const topProb = computedTree?.probability || 0.01;
-        const sensitivityList = computeSensitivity(computedTree, topProb)?.sort((a, b) => b.fv - a.fv) || [];
-
-        const computeCutSets = (node: any): string[][] => {
-          if (!node) return [];
-          if (node.type === "event") return [[node.label]];
-
-          const childCutSets = (node.children || []).map((c: any) => computeCutSets(c));
-          if (childCutSets.length === 0) return [];
-
-          if (node.gateType === "OR") {
-            return childCutSets.flat(1);
-          } else if (node.gateType === "AND") {
-            const combined: string[] = [];
-            childCutSets.forEach((sets: string[][]) => {
-              sets.forEach((s: string[]) => combined.push(...s));
-            });
-            return [Array.from(new Set(combined))];
-          }
-          return [];
-        };
-
-        const cutSets = computeCutSets(computedTree);
+        const layout = computeLayout(computedTree);
+        const computedCutSets = computeMinimalCutSets(computedTree);
+        const liveBasicEvents = getBasicEvents(computedTree);
 
         const truncSvg = (text: string, max: number) =>
           text && text.length > max ? text.slice(0, max - 1) + "…" : (text || "—");
 
-        const countLeaves = (n: any): number => {
-          if (!n || !n.children || n.children.length === 0) return 1;
-          return n.children.reduce((s: number, c: any) => s + countLeaves(c), 0);
-        };
-
-        const renderTreeSvg = (node: any, x: number, y: number, spread: number): React.ReactNode => {
+        const renderTreeSvg = (node: any, layoutObj: any): React.ReactNode => {
+          if (!node) return null;
+          const pos = layoutObj.coords[node.id];
+          if (!pos) return null;
+          const { x, y } = pos;
           const children = node.children || [];
-          const childCount = children.length;
 
-          let borderCol = "stroke-emerald-500 fill-emerald-500/10";
-          if (node.probability > 0.05 && node.probability <= 0.2) borderCol = "stroke-amber-500 fill-amber-500/10";
-          if (node.probability > 0.2) borderCol = "stroke-red-500 fill-red-500/10";
+          const borderCol = node.probability > 0.5
+            ? "stroke-destructive/70 fill-destructive/5"
+            : node.probability > 0.2
+              ? "stroke-amber-500/70 fill-amber-500/5"
+              : "stroke-emerald-500/70 fill-emerald-500/5";
 
-          const label = node.label || "";
-          const line1 = truncSvg(label, 22);
-          const line2 = label.length > 22 ? truncSvg(label.slice(21), 21) : null;
-          const NODE_H = 70;
-          const NODE_W = 160;
-          const NODE_HALF_W = NODE_W / 2;
-          const NODE_HALF_H = NODE_H / 2;
-          const LEVEL_GAP = 115;
-          const MIN_SPACING = 175;
+          const isSelected = selectedFTAEventId === node.id;
+          const highlightStroke = isSelected ? "stroke-primary stroke-[3px]" : borderCol + " stroke-[1.5px]";
 
           return (
             <g key={node.id}>
-              {childCount > 0 && children.map((child: any, i: number) => {
-                const effectiveSpread = Math.max(MIN_SPACING, spread / childCount);
-                const cx = x + (i - (childCount - 1) / 2) * effectiveSpread;
-                const cy = y + LEVEL_GAP;
+              {children.map((child: any) => {
+                const childPos = layoutObj.coords[child.id];
+                if (!childPos) return null;
                 return (
-                  <g key={child.id}>
-                    <line x1={x} y1={y + NODE_HALF_H} x2={cx} y2={cy - NODE_HALF_H}
-                      stroke="currentColor" strokeWidth="1.5" className="text-border" />
-                    {renderTreeSvg(child, cx, cy, effectiveSpread * 0.85)}
+                  <g key={`line-${node.id}-${child.id}`}>
+                    <line
+                      x1={x}
+                      y1={y + 35}
+                      x2={childPos.x}
+                      y2={childPos.y - 35}
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      className="text-border/60 hover:text-primary transition-colors duration-200"
+                    />
+                    {renderTreeSvg(child, layoutObj)}
                   </g>
                 );
               })}
 
-              <g transform={`translate(${x - NODE_HALF_W}, ${y - NODE_HALF_H})`}
-                className="cursor-pointer" onClick={() => setSelectedFTAEvent(node)}>
-                <rect width={NODE_W} height={NODE_H} rx="6" className={borderCol} strokeWidth="2" />
+              <g
+                transform={`translate(${x - 80}, ${y - 35})`}
+                className="cursor-pointer group"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedFTAEventId(node.id);
+                }}
+              >
+                <rect
+                  width="160"
+                  height="70"
+                  rx="8"
+                  className={`transition-all duration-200 ${highlightStroke}`}
+                  style={{
+                    stroke: isSelected ? "hsl(var(--primary))" : undefined,
+                    filter: isSelected ? "drop-shadow(0px 0px 8px rgba(var(--primary-rgb), 0.4))" : undefined
+                  }}
+                />
+
+                <rect
+                  x="10"
+                  y="-10"
+                  width="44"
+                  height="16"
+                  rx="4"
+                  className="fill-secondary stroke-border stroke-[1px]"
+                />
+                <text
+                  x="32"
+                  y="1"
+                  textAnchor="middle"
+                  fontSize="8"
+                  className="fill-muted-foreground font-mono font-bold uppercase"
+                >
+                  {node.type === "gate" ? `${node.gateType} GATE` : "EVENT"}
+                </text>
 
                 {node.type === "gate" && (
-                  <g transform="translate(8, 38)">
-                    <circle cx="8" cy="7" r="7" className="fill-secondary stroke-primary" strokeWidth="1.5" />
-                    <text x="8" y="11" textAnchor="middle" fontSize="9" fontFamily="monospace" fontWeight="bold" className="fill-primary">
+                  <g transform="translate(132, 10)">
+                    <circle cx="8" cy="8" r="8" className="fill-primary/10 stroke-primary/30" strokeWidth="1" />
+                    <text x="8" y="12" textAnchor="middle" fontSize="10" fontWeight="bold" className="fill-primary">
                       {node.gateType === "AND" ? "∧" : node.gateType === "OR" ? "∨" : "¬"}
                     </text>
                   </g>
                 )}
 
-                <text x={NODE_HALF_W} y="15" textAnchor="middle" fontSize="8" fontFamily="monospace"
-                  fontWeight="bold" style={{ fill: "var(--muted-foreground)", textTransform: "uppercase" }}>
-                  {node.type === "gate" ? `${node.gateType} GATE` : "EVENT"}
-                </text>
+                {(() => {
+                  const label = node.label || "";
+                  if (label.length > 18) {
+                    const firstPart = label.slice(0, 18);
+                    const secondPart = label.slice(18, 36) + (label.length > 36 ? "…" : "");
+                    return (
+                      <>
+                        <text x="80" y="26" textAnchor="middle" fontSize="9.5" fontWeight="600" className="fill-foreground font-sans">
+                          {firstPart}
+                        </text>
+                        <text x="80" y="38" textAnchor="middle" fontSize="9.5" fontWeight="600" className="fill-foreground font-sans">
+                          {secondPart}
+                        </text>
+                      </>
+                    );
+                  }
+                  return (
+                    <text x="80" y="34" textAnchor="middle" fontSize="9.5" fontWeight="600" className="fill-foreground font-sans">
+                      {label}
+                    </text>
+                  );
+                })()}
 
-                <text x={NODE_HALF_W} y={line2 ? "30" : "36"} textAnchor="middle" fontSize="9"
-                  fontWeight="600" style={{ fill: "var(--foreground)" }}>
-                  {line1}
-                </text>
-                {line2 && (
-                  <text x={NODE_HALF_W} y="42" textAnchor="middle" fontSize="9"
-                    fontWeight="600" style={{ fill: "var(--foreground)" }}>
-                    {line2}
-                  </text>
-                )}
-
-                <text x={NODE_HALF_W} y={line2 ? "60" : "56"} textAnchor="middle" fontSize="8"
-                  fontFamily="monospace" fontWeight="600" style={{ fill: "var(--primary)" }}>
+                <text
+                  x="80"
+                  y="58"
+                  textAnchor="middle"
+                  fontSize="9.5"
+                  className="fill-primary/80 font-mono font-semibold"
+                >
                   P: {(node.probability * 100).toFixed(2)}%
                 </text>
               </g>
@@ -4214,16 +4366,13 @@ function CasePage() {
             </div>
 
             {(() => {
-              const leafCount = countLeaves(computedTree);
-              const svgW = Math.max(900, leafCount * 185 + 200);
-              const svgH = 400;
-              const cx = svgW / 2;
-              const initialSpread = Math.max(280, (leafCount * 185) / 2);
+              const svgW = layout.svgW;
+              const svgH = layout.svgH;
               return (
                 <div className="bg-secondary/20 border border-border/50 rounded-xl p-4 overflow-x-auto">
                   <div style={{ width: svgW, height: svgH }} className="relative">
                     <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`}>
-                      {computedTree && renderTreeSvg(computedTree, cx, 50, initialSpread)}
+                      {computedTree && renderTreeSvg(computedTree, layout)}
                     </svg>
                   </div>
                 </div>
@@ -4241,9 +4390,30 @@ function CasePage() {
                       <input
                         type="text"
                         value={selectedFTAEvent.label}
-                        onChange={(e) => updateFTNode(selectedFTAEvent.id, "label", e.target.value)}
+                        onChange={(e) => updateFTNode(selectedFTAEvent.id, { label: e.target.value })}
                         className="w-full text-xs font-semibold p-1.5 bg-background border border-border rounded text-foreground"
                       />
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] text-muted-foreground font-mono block">NODE TYPE</label>
+                      <select
+                        value={selectedFTAEvent.type}
+                        onChange={(e) => {
+                          const newType = e.target.value;
+                          if (newType === "gate") {
+                            updateFTNode(selectedFTAEvent.id, { type: "gate", gateType: "OR", children: [] });
+                          } else {
+                            if (window.confirm("Converting to Event will remove all its sub-events/children. Proceed?")) {
+                              updateFTNode(selectedFTAEvent.id, { type: "event", children: [], probability: 0.05 });
+                            }
+                          }
+                        }}
+                        className="w-full p-1.5 text-xs font-mono bg-background border border-border rounded text-foreground"
+                      >
+                        <option value="event">Basic Event (Leaf)</option>
+                        <option value="gate">Logic Gate (AND/OR/NOT)</option>
+                      </select>
                     </div>
 
                     {selectedFTAEvent.type === "gate" ? (
@@ -4251,7 +4421,7 @@ function CasePage() {
                         <label className="text-[10px] text-muted-foreground font-mono block">GATE LOGIC TYPE</label>
                         <select
                           value={selectedFTAEvent.gateType}
-                          onChange={(e) => updateFTNode(selectedFTAEvent.id, "gateType", e.target.value)}
+                          onChange={(e) => updateFTNode(selectedFTAEvent.id, { gateType: e.target.value })}
                           className="w-full p-1.5 text-xs font-mono bg-background border border-border rounded text-foreground"
                         >
                           <option value="OR">OR Gate (Any input causes event)</option>
@@ -4261,7 +4431,23 @@ function CasePage() {
                       </div>
                     ) : (
                       <div>
-                        <label className="text-[10px] text-muted-foreground font-mono block">FAILURE PROBABILITY (0 - 1)</label>
+                        <label className="text-[10px] text-muted-foreground font-mono block">FAILURE PROBABILITY</label>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="1"
+                            value={Math.round(selectedFTAEvent.probability * 100)}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value) || 0;
+                              updateFTNode(selectedFTAEvent.id, { probability: Math.max(0, Math.min(100, val)) / 100 });
+                            }}
+                            className="w-16 p-1 text-xs font-mono bg-background border border-border rounded text-foreground text-center"
+                          />
+                          <span className="text-xs font-mono font-bold text-primary">%</span>
+                          <span className="text-[10px] text-muted-foreground ml-auto">(0% - 100%)</span>
+                        </div>
                         <div className="flex items-center gap-2">
                           <input
                             type="range"
@@ -4269,15 +4455,13 @@ function CasePage() {
                             max="1"
                             step="0.01"
                             value={selectedFTAEvent.probability}
-                            onChange={(e) => updateFTNode(selectedFTAEvent.id, "probability", parseFloat(e.target.value))}
+                            onChange={(e) => updateFTNode(selectedFTAEvent.id, { probability: parseFloat(e.target.value) })}
                             className="flex-1 accent-primary"
                           />
-                          <span className="font-mono text-primary font-bold">{selectedFTAEvent.probability}</span>
                         </div>
                       </div>
                     )}
 
-                    {/* AI diagnostic metadata — read-only */}
                     {(selectedFTAEvent.failureMode || selectedFTAEvent.detectionMethod) && (
                       <div className="space-y-2 pt-2 border-t border-border/20">
                         {selectedFTAEvent.failureMode && (
@@ -4290,18 +4474,6 @@ function CasePage() {
                           <div>
                             <span className="text-[10px] text-muted-foreground font-mono block">DETECTION METHOD</span>
                             <span className="text-xs font-medium">{selectedFTAEvent.detectionMethod}</span>
-                          </div>
-                        )}
-                        {selectedFTAEvent.evidenceFOR && selectedFTAEvent.evidenceFOR !== "None" && (
-                          <div>
-                            <span className="text-[10px] text-emerald-400 font-mono block">EVIDENCE FOR</span>
-                            <span className="text-xs text-muted-foreground">{selectedFTAEvent.evidenceFOR}</span>
-                          </div>
-                        )}
-                        {selectedFTAEvent.evidenceAGAINST && selectedFTAEvent.evidenceAGAINST !== "None" && (
-                          <div>
-                            <span className="text-[10px] text-rose-400 font-mono block">EVIDENCE AGAINST</span>
-                            <span className="text-xs text-muted-foreground">{selectedFTAEvent.evidenceAGAINST}</span>
                           </div>
                         )}
                       </div>
@@ -4318,9 +4490,11 @@ function CasePage() {
                           </Button>
                         </>
                       )}
-                      <Button size="sm" variant="destructive" onClick={() => deleteFTNode(selectedFTAEvent.id)}>
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
+                      {selectedFTAEvent.id !== "top-event" && (
+                        <Button size="sm" variant="destructive" onClick={() => deleteFTNode(selectedFTAEvent.id)}>
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -4328,71 +4502,202 @@ function CasePage() {
                 )}
               </div>
 
-              {/* Minimal Cut Sets — prefer AI-provided data, fall back to computed */}
-              <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3">
-                <span className="text-xs text-primary font-bold mono">// MINIMAL CUT SETS ANALYSIS</span>
-                <p className="text-[10px] text-muted-foreground">Sets of basic failures that independently trigger the Top Event:</p>
+              <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3 flex flex-col">
+                <div className="flex justify-between items-center border-b border-border/40 pb-2">
+                  <span className="text-xs text-primary font-bold mono">// MINIMAL CUT SETS</span>
+                  {aiCutSets && (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setCutSetTab("live")}
+                        className={`text-[9px] px-2 py-0.5 rounded font-mono ${cutSetTab === "live" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}
+                      >
+                        Live
+                      </button>
+                      <button
+                        onClick={() => setCutSetTab("ai")}
+                        className={`text-[9px] px-2 py-0.5 rounded font-mono ${cutSetTab === "ai" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}
+                      >
+                        AI Diagnosed
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <div className="space-y-2 max-h-[220px] overflow-y-auto">
-                  {aiCutSets ? aiCutSets.map((cs: any, i: number) => (
-                    <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-primary font-bold font-mono">{cs.cutSetId || `MCS-${i + 1}`}</span>
-                        {cs.criticality && (
-                          <Badge className={`text-[9px] px-1.5 py-0 font-mono ${cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
-                            cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
-                              "bg-blue-500/20 text-blue-400 border-blue-500/30"
-                            }`}>{cs.criticality.toUpperCase()}</Badge>
+                  {cutSetTab === "live" || !aiCutSets ? (
+                    computedCutSets.length === 0 ? (
+                      <p className="text-xs text-muted-foreground italic font-mono">// No cutsets computed.</p>
+                    ) : (
+                      computedCutSets.map((set, i) => {
+                        const p = set.reduce((acc, nodeId) => {
+                          const match = findNodeById(computedTree, nodeId);
+                          return acc * (match ? match.probability : 0.0);
+                        }, 1.0);
+                        return (
+                          <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs flex flex-col gap-1.5">
+                            <div className="flex justify-between items-center text-[10px] font-mono text-muted-foreground">
+                              <span className="text-primary font-bold">Cutset {i + 1}</span>
+                              <span>P: {(p * 100).toFixed(2)}%</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {set.map((nodeId) => {
+                                const match = findNodeById(computedTree, nodeId);
+                                const label = match ? match.label : nodeId;
+                                return (
+                                  <Badge
+                                    key={nodeId}
+                                    variant="outline"
+                                    className="cursor-pointer hover:bg-primary/20 hover:text-primary transition-colors text-[9px] font-sans px-1.5 py-0.5 bg-primary/10 border-primary/25"
+                                    onClick={() => setSelectedFTAEventId(nodeId)}
+                                  >
+                                    {label}
+                                  </Badge>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )
+                  ) : (
+                    aiCutSets.map((cs: any, i: number) => (
+                      <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-primary font-bold font-mono">{cs.cutSetId || `MCS-${i + 1}`}</span>
+                          {cs.criticality && (
+                            <Badge className={`text-[9px] px-1.5 py-0 font-mono ${cs.criticality === "critical" ? "bg-red-500/20 text-red-400 border-red-500/30" :
+                              cs.criticality === "high" ? "bg-amber-500/20 text-amber-400 border-amber-500/30" :
+                                "bg-blue-500/20 text-blue-400 border-blue-500/30"
+                              }`}>{cs.criticality.toUpperCase()}</Badge>
+                          )}
+                          {cs.probability !== undefined && (
+                            <span className="font-mono text-muted-foreground ml-auto text-[10px]">P: {(cs.probability * 100).toFixed(0)}%</span>
+                          )}
+                        </div>
+                        {cs.description && (
+                          <p className="text-muted-foreground text-[10px] leading-relaxed mb-1">{cs.description}</p>
                         )}
-                        {cs.probability !== undefined && (
-                          <span className="font-mono text-muted-foreground ml-auto text-[10px]">P: {(cs.probability * 100).toFixed(0)}%</span>
+                        {Array.isArray(cs.basicEvents) && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {cs.basicEvents.map((be: string) => (
+                              <span key={be} className="text-[9px] font-mono px-1.5 py-0.5 bg-primary/10 text-primary rounded border border-primary/20">{be}</span>
+                            ))}
+                          </div>
                         )}
                       </div>
-                      {cs.description && (
-                        <p className="text-muted-foreground text-[10px] leading-relaxed mb-1">{cs.description}</p>
-                      )}
-                      {Array.isArray(cs.basicEvents) && (
-                        <div className="flex flex-wrap gap-1 mt-1">
-                          {cs.basicEvents.map((be: string) => (
-                            <span key={be} className="text-[9px] font-mono px-1.5 py-0.5 bg-primary/10 text-primary rounded border border-primary/20">{be}</span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )) : cutSets.map((set, i) => (
-                    <div key={i} className="p-2 rounded bg-background/50 border border-border/40 text-xs font-mono">
-                      <span className="text-primary font-bold">Cutset {i + 1}: </span>
-                      <span>{set.join(" AND ")}</span>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               </div>
 
-              {/* Structural Importance — prefer AI data, fall back to computed Fussell-Vesely */}
-              <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3">
-                <span className="text-xs text-primary font-bold mono">
-                  {aiImportance ? "// STRUCTURAL IMPORTANCE" : "// SENSITIVITY (FUSSELL-VESELY)"}
-                </span>
-                <p className="text-[10px] text-muted-foreground">
-                  {aiImportance ? "Critical events ranked by structural importance with corrective recommendations:" : "Importance measure representing contribution to overall risk:"}
-                </p>
-                <div className="space-y-2 max-h-[220px] overflow-y-auto">
-                  {aiImportance ? aiImportance.map((item: any, i: number) => (
-                    <div key={i} className="text-xs border border-border/30 rounded p-2 bg-background/30">
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="font-mono font-bold text-primary">{item.eventId}</span>
-                        <span className="font-mono font-bold text-primary">{(item.structuralImportance * 100).toFixed(0)}%</span>
-                      </div>
-                      <p className="text-muted-foreground text-[10px] mb-1">• {item.description}</p>
-                      {item.recommendation && (
-                        <p className="text-[10px] text-amber-400/90 italic leading-relaxed">→ {item.recommendation}</p>
+              <div className="bg-secondary/30 border border-border/50 rounded-xl p-4 space-y-3 flex flex-col">
+                <div className="flex justify-between items-center border-b border-border/40 pb-2">
+                  <span className="text-xs text-primary font-bold mono">// SENSITIVITY & INPUTS</span>
+                  {aiImportance && (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => setSensitivityTab("live")}
+                        className={`text-[9px] px-2 py-0.5 rounded font-mono ${sensitivityTab === "live" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}
+                      >
+                        Live Edit
+                      </button>
+                      <button
+                        onClick={() => setSensitivityTab("ai")}
+                        className={`text-[9px] px-2 py-0.5 rounded font-mono ${sensitivityTab === "ai" ? "bg-primary text-white" : "bg-muted text-muted-foreground"}`}
+                      >
+                        AI Priority
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1">
+                  {sensitivityTab === "live" || !aiImportance ? (
+                    <div className="space-y-2">
+                      {liveBasicEvents.length === 0 ? (
+                        <p className="text-xs text-muted-foreground italic font-mono">// No basic events in tree.</p>
+                      ) : (
+                        liveBasicEvents.map((beNode) => {
+                          const fv = topProb > 0 ? (beNode.probability / topProb) : 0.0;
+                          const fvPercent = (fv * 100).toFixed(1);
+                          return (
+                            <div key={beNode.id} className="p-2 rounded bg-background/40 border border-border/30 flex flex-col gap-1.5 hover:border-primary/40 transition-colors">
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={beNode.label}
+                                  onChange={(e) => updateFTNode(beNode.id, { label: e.target.value })}
+                                  className="text-xs font-semibold bg-transparent border-0 border-b border-transparent hover:border-border/50 focus:border-primary focus:ring-0 p-0 flex-1 truncate"
+                                />
+                                <span className="text-[10px] font-mono text-muted-foreground shrink-0 bg-primary/10 text-primary border border-primary/20 px-1.5 py-0.2 rounded font-bold">
+                                  {fvPercent}% Risk
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-3 justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[9px] font-mono text-muted-foreground">P:</span>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    value={Math.round(beNode.probability * 100)}
+                                    onChange={(e) => {
+                                      const percentVal = parseFloat(e.target.value) || 0;
+                                      updateFTNode(beNode.id, { probability: Math.max(0, Math.min(100, percentVal)) / 100 });
+                                    }}
+                                    className="w-14 text-right p-0.5 text-xs font-mono bg-background border border-border rounded"
+                                  />
+                                  <span className="text-[10px] text-muted-foreground">%</span>
+                                </div>
+                                <div className="flex gap-1.5">
+                                  <button
+                                    onClick={() => setSelectedFTAEventId(beNode.id)}
+                                    className="text-[9px] px-1.5 py-0.5 bg-secondary border border-border rounded text-muted-foreground hover:text-foreground hover:bg-accent"
+                                    title="Highlight in Diagram"
+                                  >
+                                    Focus
+                                  </button>
+                                  <button
+                                    onClick={() => deleteFTNode(beNode.id)}
+                                    className="text-[9px] px-1.5 py-0.5 bg-red-500/10 border border-red-500/20 rounded text-red-400 hover:text-red-300 hover:bg-red-500/20"
+                                    title="Delete event"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })
                       )}
+                      
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="w-full text-xs font-mono py-1.5"
+                        onClick={() => {
+                          const targetGateId = (selectedFTAEvent && selectedFTAEvent.type === "gate")
+                            ? selectedFTAEvent.id
+                            : "top-event";
+                          addFTNode(targetGateId, "event");
+                        }}
+                      >
+                        <Plus className="w-3 h-3 mr-1" /> Add Basic Event
+                      </Button>
                     </div>
-                  )) : sensitivityList.map((item, i) => (
-                    <div key={i} className="flex justify-between items-center text-xs font-mono">
-                      <span className="truncate flex-1 text-muted-foreground pr-2">• {item.label}</span>
-                      <span className="font-bold text-primary">{item.fv}%</span>
-                    </div>
-                  ))}
+                  ) : (
+                    aiImportance.map((item: any, i: number) => (
+                      <div key={i} className="text-xs border border-border/30 rounded p-2 bg-background/30">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="font-mono font-bold text-primary">{item.eventId}</span>
+                          <span className="font-mono font-bold text-primary">{(item.structuralImportance * 100).toFixed(0)}%</span>
+                        </div>
+                        <p className="text-muted-foreground text-[10px] mb-1">• {item.description}</p>
+                        {item.recommendation && (
+                          <p className="text-[10px] text-amber-400/90 italic leading-relaxed">→ {item.recommendation}</p>
+                        )}
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
