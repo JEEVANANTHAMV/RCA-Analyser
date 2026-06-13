@@ -611,6 +611,7 @@ function CasePage() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["msgs", convId] });
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
       setIsDirty(false);
       setSaveStatus("saved");
       setLastSavedTime(new Date());
@@ -639,6 +640,7 @@ function CasePage() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["msgs", convId] });
+      qc.invalidateQueries({ queryKey: ["case", caseId] });
       setIsDirty(false);
       setSaveStatus("saved");
       setLastSavedTime(new Date());
@@ -1632,10 +1634,10 @@ function CasePage() {
 
   // Sync reportApproved from DB-persisted parsedData when the report agent loads
   useEffect(() => {
-    if (currentAgent?.key === "report" && parsedData?.approved !== undefined) {
-      setReportApproved(!!parsedData.approved);
+    if (currentAgent?.key === "report") {
+      setReportApproved(!!parsedData?.approved || caseStatus === "completed");
     }
-  }, [currentAgent?.key, parsedData?.approved]);
+  }, [currentAgent?.key, parsedData?.approved, caseStatus]);
 
   const renderMessageContent = (content: string, role: string, isCompletedRecord = false) => {
     if (role === "assistant") {

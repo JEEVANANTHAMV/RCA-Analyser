@@ -1790,6 +1790,25 @@ export const updateAssistantMessage = createServerFn({ method: "POST" })
       data.content, rawResStr, data.messageId,
     ]);
     await execute("UPDATE conversations SET updated_at = NOW() WHERE id = ?", [data.conversationId]);
+
+    const conv = await queryOne<{ rca_case_id: string; agent_key: string }>(
+      "SELECT rca_case_id, agent_key FROM conversations WHERE id = ?",
+      [data.conversationId]
+    );
+    if (conv && conv.agent_key === "report") {
+      try {
+        const parsed = JSON.parse(data.content);
+        const approved = !!parsed.approved;
+        const status = approved ? "completed" : "in_progress";
+        await execute(
+          "UPDATE rca_cases SET status = ?, final_report = ? WHERE id = ?",
+          [status, approved ? rawResStr : null, conv.rca_case_id]
+        );
+      } catch (e) {
+        console.error("Failed to parse report content for status sync:", e);
+      }
+    }
+
     return { ok: true };
   });
 
