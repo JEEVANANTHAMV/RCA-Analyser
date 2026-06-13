@@ -344,7 +344,8 @@ function DashboardPage() {
     const assetMatch = c.asset_id?.toLowerCase().includes(search);
     if (searchTerm && !titleMatch && !assetMatch) return false;
 
-    if (statusFilter !== "all" && c.status !== statusFilter) return false;
+    const effectiveStatus = c.report_approved === true ? "completed" : c.status;
+    if (statusFilter !== "all" && effectiveStatus !== statusFilter) return false;
 
     if (dateFilter !== "all") {
       const caseDate = new Date(c.updated_at).getTime();
@@ -365,7 +366,7 @@ function DashboardPage() {
   const renderTrainTrack = (c: any) => {
     const agentKeys = ["data_collector", "timeline", "equipment", "five_why", "fishbone", "fta", "pareto", "report"];
     const completedSet = new Set(c.completed_agents || []);
-    const isCompleted = c.status === "completed";
+    const isCompleted = c.report_approved === true;
     const firstIncompleteIdx = isCompleted ? -1 : agentKeys.findIndex(key => !completedSet.has(key));
 
     return (
@@ -769,7 +770,7 @@ function DashboardPage() {
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredCases.map((c: any) => {
-                const isCompleted = c.status === "completed";
+                const isCompleted = c.report_approved === true;
                 const nextStepIdx = getNextStepIndex(c.completed_agents);
 
                 return (

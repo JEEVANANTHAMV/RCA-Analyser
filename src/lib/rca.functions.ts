@@ -1292,7 +1292,7 @@ export const listMyCases = createServerFn({ method: "GET" })
         "SELECT id, agent_key FROM conversations WHERE rca_case_id = ?",
         [c.id],
       );
-      
+
       const completedAgents = new Set<string>();
       for (const conv of convos) {
         const msg = await queryOne<{ cnt: number }>(
@@ -1313,7 +1313,30 @@ export const listMyCases = createServerFn({ method: "GET" })
       }
       if (editLocked) completedAgents.add("data_collector");
 
-      return { ...c, completed_agents: Array.from(completedAgents) };
+      // Check report agent's latest message for approved flag
+      let reportApproved = false;
+      const reportConvo = convos.find(cv => cv.agent_key === "report");
+      if (reportConvo) {
+        const lastMsg = await queryOne<{ content: string; raw_response: string }>(
+          "SELECT content, raw_response FROM messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+          [reportConvo.id],
+        );
+        if (lastMsg) {
+          for (const src of [lastMsg.content, lastMsg.raw_response]) {
+            if (!src) continue;
+            try {
+              const j = extractFirstJsonString(src) ?? src;
+              const parsed = JSON.parse(j);
+              if (parsed.approved) {
+                reportApproved = true;
+                break;
+              }
+            } catch {}
+          }
+        }
+      }
+
+      return { ...c, completed_agents: Array.from(completedAgents), report_approved: reportApproved };
     }));
 
     return { cases: casesWithProgress };
