@@ -83,9 +83,142 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("Successfully connected to both databases. Starting migration...\n");
+  console.log("Successfully connected to both databases. Initializing schema in MySQL...\n");
 
   try {
+    // ─── Create Tables ───────────────────────────────────────────────────────
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(36) PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT,
+        role ENUM('admin','user') NOT NULL DEFAULT 'user',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        token TEXT NOT NULL,
+        expires_at DATETIME NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS rca_cases (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        title TEXT NOT NULL,
+        asset_id TEXT,
+        status ENUM('in_progress','completed','archived') NOT NULL DEFAULT 'in_progress',
+        incident_data LONGTEXT,
+        final_report LONGTEXT,
+        is_public TINYINT(1) NOT NULL DEFAULT 0,
+        public_slug VARCHAR(50),
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        id VARCHAR(36) PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        agent_key VARCHAR(100) NOT NULL,
+        session_id VARCHAR(100) NOT NULL,
+        title TEXT,
+        incident_context LONGTEXT,
+        rca_case_id VARCHAR(36),
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (rca_case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_conversation (rca_case_id, agent_key, user_id)
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id VARCHAR(36) PRIMARY KEY,
+        conversation_id VARCHAR(36) NOT NULL,
+        role ENUM('user','assistant','system') NOT NULL,
+        content LONGTEXT NOT NULL,
+        raw_response LONGTEXT,
+        attachments LONGTEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS invites (
+        code VARCHAR(50) PRIMARY KEY,
+        email VARCHAR(255),
+        role ENUM('admin','user') NOT NULL DEFAULT 'user',
+        created_by VARCHAR(36) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        used_at DATETIME,
+        used_by VARCHAR(36),
+        FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS case_collaborators (
+        id VARCHAR(36) PRIMARY KEY,
+        case_id VARCHAR(36) NOT NULL,
+        user_id VARCHAR(36) NOT NULL,
+        added_by VARCHAR(36) NOT NULL,
+        added_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (added_by) REFERENCES users(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_collaborator (case_id, user_id)
+      ) CHARACTER SET utf8mb4
+    `);
+
+    await mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS rca_edit_history (
+        id VARCHAR(36) PRIMARY KEY,
+        case_id VARCHAR(36) NOT NULL,
+        user_id VARCHAR(36) NOT NULL,
+        section VARCHAR(100) NOT NULL,
+        snapshot LONGTEXT,
+        summary TEXT,
+        changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (case_id) REFERENCES rca_cases(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) CHARACTER SET utf8mb4
+    `);
+
+    // Create Indexes
+    const indexes = [
+      "CREATE INDEX idx_messages_conversation ON messages(conversation_id, created_at)",
+      "CREATE INDEX idx_conversations_case ON conversations(rca_case_id)",
+      "CREATE INDEX idx_rca_cases_user ON rca_cases(user_id)",
+      "CREATE INDEX idx_sessions_token ON sessions(token(255))",
+      "CREATE INDEX idx_sessions_user ON sessions(user_id)",
+      "CREATE INDEX idx_sessions_expires ON sessions(expires_at)",
+      "CREATE INDEX idx_collaborators_case ON case_collaborators(case_id)",
+      "CREATE INDEX idx_collaborators_user ON case_collaborators(user_id)",
+      "CREATE INDEX idx_edit_history_case ON rca_edit_history(case_id, changed_at)",
+      "CREATE INDEX idx_invites_code ON invites(code)",
+    ];
+    for (const idx of indexes) {
+      try { await mysqlPool.execute(idx); } catch { /* index already exists */ }
+    }
+
+    console.log("Database schema initialized. Starting row migration...\n");
+
     // ─── Migrate tables in dependency order ──────────────────────────────────
     
     // 1. Users
