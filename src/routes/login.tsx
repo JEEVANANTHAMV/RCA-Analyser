@@ -19,20 +19,31 @@ export const Route = createFileRoute("/login")({
 
 function LoginPage() {
   const nav = useNavigate();
-  const { login } = useAuth();
+  const { login, loading: authLoading } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Disabled while the app is still booting (chunks loading / cookie check)
+  // or while a login request is in-flight
+  const busy = authLoading || submitting;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (busy) return; // guard: ignore accidental submit during boot
     setErr(null);
-    setLoading(true);
+    setSubmitting(true);
     const result = await login(email, password);
-    setLoading(false);
+    setSubmitting(false);
     if (result.error) return setErr(result.error);
     nav({ to: "/dashboard" });
+  }
+
+  function buttonLabel() {
+    if (authLoading) return <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Initializing…</>;
+    if (submitting) return <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Authenticating…</>;
+    return "Sign in";
   }
 
   return (
@@ -54,6 +65,7 @@ function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              disabled={busy}
               required
             />
           </div>
@@ -64,12 +76,13 @@ function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={busy}
               required
             />
           </div>
           {err && <p className="text-sm text-destructive font-mono">{err}</p>}
-          <Button type="submit" disabled={loading} className="w-full">
-            {loading ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Authenticating…</>) : "Sign in"}
+          <Button type="submit" disabled={busy} className="w-full">
+            {buttonLabel()}
           </Button>
           <p className="text-sm text-muted-foreground text-center">
             No account?{" "}
